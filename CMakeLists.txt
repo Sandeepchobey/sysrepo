@@ -1,0 +1,380 @@
+cmake_minimum_required(VERSION 2.8.12)
+
+project(sysrepo)
+set(SYSREPO_DESC "YANG-based system repository for all-around configuration management.")
+
+# include custom Modules
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/CMakeModules/")
+
+include(GNUInstallDirs)
+include(CheckSymbolExists)
+include(CheckLibraryExists)
+include(UseCompat)
+include(ABICheck)
+include(SourceFormat)
+include(GenDoc)
+if(POLICY CMP0075)
+    cmake_policy(SET CMP0075 NEW)
+endif()
+
+# osx specific
+set(CMAKE_MACOSX_RPATH TRUE)
+
+# set default build type if not specified by user and normalize it
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Debug)
+endif()
+string(TOUPPER "${CMAKE_BUILD_TYPE}" BUILD_TYPE_UPPER)
+if("${BUILD_TYPE_UPPER}" STREQUAL "RELEASE")
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build Type" FORCE)
+elseif("${BUILD_TYPE_UPPER}" STREQUAL "DEBUG")
+    set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Build Type" FORCE)
+elseif("${BUILD_TYPE_UPPER}" STREQUAL "RELWITHDEBINFO")
+    set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Build Type" FORCE)
+elseif("${BUILD_TYPE_UPPER}" STREQUAL "RELWITHDEBUG")
+    set(CMAKE_BUILD_TYPE "RelWithDebug" CACHE STRING "Build Type" FORCE)
+elseif("${BUILD_TYPE_UPPER}" STREQUAL "ABICHECK")
+    set(CMAKE_BUILD_TYPE "ABICheck" CACHE STRING "Build Type" FORCE)
+elseif("${BUILD_TYPE_UPPER}" STREQUAL "DOCONLY")
+    set(CMAKE_BUILD_TYPE "DocOnly" CACHE STRING "Build Type" FORCE)
+endif()
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
+
+if(NOT UNIX)
+    message(FATAL_ERROR "Only Unix-like systems are supported.")
+endif()
+
+if(NOT FORCE_WSL AND EXISTS "/proc/sys/kernel/osrelease")
+    file(READ "/proc/sys/kernel/osrelease" OS_RELEASE)
+    string(FIND ${OS_RELEASE} "Microsoft" POS)
+    if(POS GREATER -1)
+        message(FATAL_ERROR "Windows Subsystem for Linux is not supported. Set FORCE_WSL var to bypass at your own risk.")
+    endif()
+endif()
+
+# Version of the project
+# Generic version of not only the library. Major version is reserved for really big changes of the project,
+# minor version changes with added functionality (new tool, functionality of the tool or library, ...) and
+# micro version is changed with a set of small changes or bugfixes anywhere in the project.
+set(SYSREPO_MAJOR_VERSION 2)
+set(SYSREPO_MINOR_VERSION 0)
+set(SYSREPO_MICRO_VERSION 1)
+set(SYSREPO_VERSION ${SYSREPO_MAJOR_VERSION}.${SYSREPO_MINOR_VERSION}.${SYSREPO_MICRO_VERSION})
+
+# Version of the library
+# Major version is changed with every backward non-compatible API/ABI change, minor version changes
+# with backward compatible change and micro version is connected with any internal change of the library.
+set(SYSREPO_MAJOR_SOVERSION 6)
+set(SYSREPO_MINOR_SOVERSION 0)
+set(SYSREPO_MICRO_SOVERSION 1)
+set(SYSREPO_SOVERSION_FULL ${SYSREPO_MAJOR_SOVERSION}.${SYSREPO_MINOR_SOVERSION}.${SYSREPO_MICRO_SOVERSION})
+set(SYSREPO_SOVERSION ${SYSREPO_MAJOR_SOVERSION})
+
+# Version of libyang library that this sysrepo depends on
+set(LIBYANG_DEP_VERSION 2.0.3)
+set(LIBYANG_DEP_SOVERSION 2.1.0)
+set(LIBYANG_DEP_SOVERSION_MAJOR 2)
+
+# generate only version header, it is needed for docs
+configure_file("${PROJECT_SOURCE_DIR}/src/version.h.in" "${PROJECT_BINARY_DIR}/version.h" ESCAPE_QUOTES @ONLY)
+
+# options
+if(("${BUILD_TYPE_UPPER}" STREQUAL "DEBUG") OR ("${BUILD_TYPE_UPPER}" STREQUAL "RELWITHDEBINFO"))
+    option(ENABLE_TESTS "Build tests" ON)
+    option(ENABLE_VALGRIND_TESTS "Build tests with valgrind" ON)
+else()
+    option(ENABLE_TESTS "Build tests" OFF)
+    option(ENABLE_VALGRIND_TESTS "Build tests with valgrind" OFF)
+endif()
+option(ENABLE_EXAMPLES "Build examples." ON)
+option(ENABLE_COVERAGE "Build code coverage report from tests" OFF)
+
+if(ENABLE_COVERAGE)
+    find_program(PATH_GCOV NAMES gcov)
+    if(NOT PATH_GCOV)
+        message(WARNING "'gcov' executable not found! Disabling building code coverage report.")
+        set(ENABLE_COVERAGE OFF)
+    endif()
+
+    find_program(PATH_LCOV NAMES lcov)
+    if(NOT PATH_LCOV)
+        message(WARNING "'lcov' executable not found! Disabling building code coverage report.")
+        set(ENABLE_COVERAGE OFF)
+    endif()
+
+    find_program(PATH_GENHTML NAMES genhtml)
+    if(NOT PATH_GENHTML)
+        message(WARNING "'genhtml' executable not found! Disabling building code coverage report.")
+        set(ENABLE_COVERAGE OFF)
+    endif()
+
+    if(NOT CMAKE_COMPILER_IS_GNUCC)
+        message(WARNING "Compiler is not gcc! Coverage may break the tests!")
+    endif()
+
+    if(ENABLE_COVERAGE)
+        set(CMAKE_C_FLAGS_COVERAGE "${CMAKE_C_FLAGS} --coverage -fprofile-arcs -ftest-coverage")
+    endif()
+endif()
+
+option(INSTALL_SYSCTL_CONF "Install sysctl conf file to allow shared access to SHM files." OFF)
+
+# compilation flags
+set(CMAKE_C_FLAGS           "${CMAKE_C_FLAGS} ${CMAKE_C_FLAGS_COVERAGE} -Wall -Wextra -Wpedantic -std=c99")
+set(CMAKE_C_FLAGS_RELEASE   "-DNDEBUG -O2")
+set(CMAKE_C_FLAGS_DEBUG     "-g -O0")
+set(CMAKE_C_FLAGS_ABICHECK  "-g -Og")
+
+# ietf-yang-library revision
+set(YANGLIB_REVISION "2019-01-04" CACHE STRING
+    "YANG module ietf-yang-library revision to implement. Only 2019-01-04 and 2016-06-21 are supported.")
+if(NOT ${YANGLIB_REVISION} STREQUAL "2019-01-04" AND NOT ${YANGLIB_REVISION} STREQUAL "2016-06-21")
+    message(FATAL_ERROR "Unsupported ietf-yang-library revision ${YANGLIB_REVISION} specified!")
+endif()
+message(STATUS "ietf-yang-library revision: ${YANGLIB_REVISION}")
+
+# umask
+set(SYSREPO_UMASK "00000" CACHE STRING "Umask used for any files created by sysrepo.")
+
+# global group settings
+set(SYSREPO_GROUP "" CACHE STRING "System group that will own all sysrepo-related files. If empty, the specific process group will be kept.")
+
+# super user
+set(SYSREPO_SUPERUSER_UID "0" CACHE STRING "UID of the system user that can execute sensitive functions.")
+if(NOT SYSREPO_SUPERUSER_UID MATCHES "^[0-9]+$")
+    message(FATAL_ERROR "Invalid superuser UID \"${SYSREPO_SUPERUSER_UID}\"!")
+endif()
+
+# paths
+if(NOT REPO_PATH)
+    if("${BUILD_TYPE_UPPER}" STREQUAL "DEBUG")
+        set(REPO_PATH "${CMAKE_BINARY_DIR}/repository")
+    else()
+        set(REPO_PATH "/etc/sysrepo")
+    endif()
+endif()
+set(REPO_PATH "${REPO_PATH}" CACHE PATH "Repository path, contains configuration schema and data files.")
+message(STATUS "Sysrepo repository: ${REPO_PATH}")
+
+set(STARTUP_DATA_PATH "${STARTUP_DATA_PATH}" CACHE PATH "Startup data path, contains startup datastore module files.")
+if(STARTUP_DATA_PATH)
+    message(STATUS "Startup data path:  ${STARTUP_DATA_PATH}")
+else()
+    message(STATUS "Startup data path:  ${REPO_PATH}/data")
+endif()
+
+set(NOTIFICATION_PATH "${NOTIFICATION_PATH}" CACHE PATH "Notification path, contains stored notifications.")
+if(NOTIFICATION_PATH)
+    message(STATUS "Notification path:  ${NOTIFICATION_PATH}")
+else()
+    message(STATUS "Notification path:  ${REPO_PATH}/data/notif")
+endif()
+
+set(YANG_MODULE_PATH "${YANG_MODULE_PATH}" CACHE PATH "YANG module path, contains all used YANG module files.")
+if(YANG_MODULE_PATH)
+    message(STATUS "YANG module path:   ${YANG_MODULE_PATH}")
+else()
+    message(STATUS "YANG module path:   ${REPO_PATH}/yang")
+endif()
+if(NOT PLUGINS_PATH)
+    set(PLUGINS_PATH "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/sysrepo/plugins/" CACHE PATH
+        "Sysrepo plugin daemon plugins path.")
+endif()
+message(STATUS "SRPD plugins path:  ${PLUGINS_PATH}")
+
+# objects
+set(LIB_SRC
+    src/sysrepo.c
+    src/common.c
+    src/log.c
+    src/replay.c
+    src/modinfo.c
+    src/edit_diff.c
+    src/lyd_mods.c
+    src/shm_main.c
+    src/shm_ext.c
+    src/shm_mod.c
+    src/shm_sub.c
+    src/utils/values.c
+    src/utils/xpath.c)
+
+set (SYSREPOCTL_SRC
+    src/executables/sysrepoctl.c)
+
+set (SYSREPOCFG_SRC
+    src/executables/sysrepocfg.c)
+
+set (SYSREPOPLUGIND_SRC
+    src/executables/sysrepo-plugind.c)
+
+# public headers
+set(LIB_HEADERS
+    src/sysrepo.h
+    src/sysrepo_types.h
+    src/utils/values.h
+    src/utils/xpath.h)
+
+# files to generate doxygen from
+set(DOXY_FILES
+    doc/
+    ${LIB_HEADERS}
+    ${PROJECT_BINARY_DIR}/version.h)
+
+# project (doxygen) logo
+set(PROJECT_LOGO
+    doc/logo.png)
+
+# source files to be covered by the 'format' target
+set(FORMAT_SOURCES
+    compat/*.c
+    compat/*.h*
+    examples/*.c
+    examples/plugin/*.c
+    src/*.c
+    src/*.h
+    src/executables/*
+    src/utils/*)
+
+if("${BUILD_TYPE_UPPER}" STREQUAL "DOCONLY")
+    gen_doc("${DOXY_FILES}" ${SYSREPO_VERSION} ${SYSREPO_DESC} ${PROJECT_LOGO})
+    return()
+endif()
+
+# use compat
+use_compat()
+
+# sysrepo
+set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
+add_library(srobj OBJECT ${LIB_SRC} ${compatsrc})
+set_target_properties(srobj PROPERTIES COMPILE_FLAGS "-fvisibility=hidden")
+add_library(sysrepo SHARED $<TARGET_OBJECTS:srobj>)
+set_target_properties(sysrepo PROPERTIES VERSION ${SYSREPO_SOVERSION_FULL} SOVERSION ${SYSREPO_SOVERSION})
+
+# sysrepoctl tool
+add_executable(sysrepoctl ${SYSREPOCTL_SRC} ${compatsrc})
+target_link_libraries(sysrepoctl sysrepo)
+
+# sysrepocfg tool
+add_executable(sysrepocfg ${SYSREPOCFG_SRC} ${compatsrc})
+target_link_libraries(sysrepocfg sysrepo)
+
+# sysrepo-plugind daemon
+add_executable(sysrepo-plugind ${SYSREPOPLUGIND_SRC} ${compatsrc})
+target_link_libraries(sysrepo-plugind sysrepo ${CMAKE_DL_LIBS})
+
+# include repository files with highest priority
+include_directories("${PROJECT_SOURCE_DIR}/src")
+include_directories(${PROJECT_BINARY_DIR})
+
+# dependencies
+# libatomic
+check_library_exists(atomic __atomic_fetch_add_4 "" LIBATOMIC)
+if(LIBATOMIC)
+    target_link_libraries(sysrepo atomic)
+endif()
+
+# librt (shm_open, shm_unlink, not required on QNX or OSX)
+find_library(LIBRT_LIBRARIES rt)
+if(LIBRT_LIBRARIES)
+    target_link_libraries(sysrepo ${LIBRT_LIBRARIES})
+endif()
+
+# libyang, check version
+find_package(LibYANG ${LIBYANG_DEP_SOVERSION} REQUIRED)
+target_link_libraries(sysrepo ${LIBYANG_LIBRARIES})
+include_directories(${LIBYANG_INCLUDE_DIRS})
+
+# pthread
+set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
+find_package(Threads REQUIRED)
+target_link_libraries(sysrepo ${CMAKE_THREAD_LIBS_INIT})
+set(CMAKE_REQUIRED_LIBRARIES pthread)
+
+# required functions
+set(CMAKE_REQUIRED_DEFINITIONS "-D_GNU_SOURCE;-D_DEFAULT_SOURCE")
+check_symbol_exists(eaccess "unistd.h" SR_HAVE_EACCESS)
+if(NOT SR_HAVE_EACCESS)
+    message(WARNING "Function eaccess() is not supported, using access() instead which may "
+        "change results of access control checks!")
+endif()
+check_symbol_exists(mkstemps "stdlib.h" SR_HAVE_MKSTEMPS)
+unset(CMAKE_REQUIRED_DEFINITIONS)
+
+# generate files
+configure_file("${PROJECT_SOURCE_DIR}/src/common.h.in" "${PROJECT_BINARY_DIR}/common.h" ESCAPE_QUOTES @ONLY)
+configure_file("${PROJECT_SOURCE_DIR}/src/executables/bin_common.h.in" "${PROJECT_BINARY_DIR}/bin_common.h" ESCAPE_QUOTES @ONLY)
+configure_file("${PROJECT_SOURCE_DIR}/sysrepo.pc.in" "${PROJECT_BINARY_DIR}/sysrepo.pc" @ONLY)
+
+# installation
+install(TARGETS sysrepo DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(FILES ${PROJECT_SOURCE_DIR}/src/sysrepo.h ${PROJECT_SOURCE_DIR}/src/sysrepo_types.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES ${PROJECT_BINARY_DIR}/version.h ${PROJECT_SOURCE_DIR}/src/utils/values.h ${PROJECT_SOURCE_DIR}/src/utils/xpath.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/sysrepo)
+install(TARGETS sysrepoctl sysrepocfg sysrepo-plugind DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+install(FILES "${PROJECT_BINARY_DIR}/sysrepo.pc" DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
+
+if(INSTALL_SYSCTL_CONF)
+    install(FILES "${PROJECT_SOURCE_DIR}/66-sysrepo-disable-fs-protected_regular.conf" DESTINATION "${CMAKE_INSTALL_PREFIX}/lib/sysctl.d/")
+endif()
+
+if ("${BUILD_TYPE_UPPER}" STREQUAL "DEBUG")
+    # enable before adding tests to let them detect that format checking is available - one of the tests is format checking
+    source_format_enable()
+endif()
+
+# source files to be covered by the 'format' target and a test with 'format-check' target
+source_format(${FORMAT_SOURCES})
+
+# tests
+if(ENABLE_TESTS)
+    find_package(CMocka 1.0.0)
+endif()
+
+if(ENABLE_VALGRIND_TESTS)
+    set(ENABLE_TESTS ON)
+endif()
+
+if(ENABLE_TESTS)
+    if(CMOCKA_FOUND)
+        enable_testing()
+        add_subdirectory(tests)
+    else()
+        message(STATUS "Disabling tests because of missing CMocka")
+        set(ENABLE_TESTS OFF)
+    endif()
+endif()
+
+# examples
+if(ENABLE_EXAMPLES)
+    add_subdirectory(examples)
+endif()
+
+# generate doxygen documentation
+gen_doc("${DOXY_FILES}" ${SYSREPO_VERSION} ${SYSREPO_DESC} ${PROJECT_LOGO})
+
+# generate API/ABI report
+if ("${BUILD_TYPE_UPPER}" STREQUAL "ABICHECK")
+    lib_abi_check(sysrepo "${LIB_HEADERS}" ${SYSREPO_SOVERSION_FULL} c1022a19895cdc6f4f8510fb36c04dcf04dbbe21)
+endif()
+
+# phony target for clearing sysrepo SHM
+add_custom_target(shm_clean
+    COMMAND rm -rf /dev/shm/sr_*
+    COMMAND rm -rf /dev/shm/srsub_*
+    COMMENT "Removing all volatile SHM files prefixed with \"sr\""
+)
+
+# phony target for clearing all sysrepo data
+add_custom_target(sr_clean
+    COMMAND rm -rf ${REPO_PATH}
+    DEPENDS shm_clean
+    COMMENT "Removing the whole persistent repository \"${REPO_PATH}\""
+)
+
+# uninstall
+add_custom_target(uninstall "${CMAKE_COMMAND}" -P "${CMAKE_MODULE_PATH}/uninstall.cmake")
+add_custom_target(uninstall_with_repo "${CMAKE_COMMAND}" -P "${CMAKE_MODULE_PATH}/uninstall.cmake"
+    COMMAND rm -rf ${REPO_PATH})
