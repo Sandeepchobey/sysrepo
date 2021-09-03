@@ -400,8 +400,9 @@ cleanup:
 
 sr_error_info_t *
 sr_subscr_notif_sub_add(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_session_ctx_t *sess, const char *mod_name,
-        const char *xpath, time_t start_time, time_t stop_time, sr_event_notif_cb notif_cb,
-        sr_event_notif_tree_cb notif_tree_cb, void *private_data, sr_lock_mode_t has_subs_lock)
+        const char *xpath, const struct timespec *listen_since, const struct timespec *start_time,
+        const struct timespec *stop_time, sr_event_notif_cb notif_cb, sr_event_notif_tree_cb notif_tree_cb,
+        void *private_data, sr_lock_mode_t has_subs_lock)
 {
     sr_error_info_t *err_info = NULL;
     struct modsub_notif_s *notif_sub = NULL;
@@ -469,8 +470,13 @@ sr_subscr_notif_sub_add(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_sessi
         SR_CHECK_MEM_GOTO(!mem[3], err_info, error_unlock);
         notif_sub->subs[notif_sub->sub_count].xpath = mem[3];
     }
-    notif_sub->subs[notif_sub->sub_count].start_time = start_time;
-    notif_sub->subs[notif_sub->sub_count].stop_time = stop_time;
+    notif_sub->subs[notif_sub->sub_count].listen_since = *listen_since;
+    if (start_time) {
+        notif_sub->subs[notif_sub->sub_count].start_time = *start_time;
+    }
+    if (stop_time) {
+        notif_sub->subs[notif_sub->sub_count].stop_time = *stop_time;
+    }
     notif_sub->subs[notif_sub->sub_count].cb = notif_cb;
     notif_sub->subs[notif_sub->sub_count].tree_cb = notif_tree_cb;
     notif_sub->subs[notif_sub->sub_count].private_data = private_data;
@@ -941,8 +947,9 @@ sr_subscr_session_count(sr_subscription_ctx_t *subscr, sr_session_ctx_t *sess, s
  * @param[in] change_subs Change subscription in ext SHM.
  * @param[in] idx Index of the subscription in @p change_subs to remove.
  * @param[in] has_subs_lock What kind of SUBS lock is held.
+ * @return err_info, NULL on success.
  */
-static void
+static sr_error_info_t *
 sr_change_sub_del(sr_subscription_ctx_t *subscr, struct modsub_change_s *change_subs, uint32_t idx,
         sr_lock_mode_t has_subs_lock)
 {
@@ -956,18 +963,19 @@ sr_change_sub_del(sr_subscription_ctx_t *subscr, struct modsub_change_s *change_
     shm_mod = sr_shmmain_find_module(SR_CONN_MAIN_SHM(subscr->conn), change_subs->module_name);
     if (!shm_mod) {
         SR_ERRINFO_INT(&err_info);
-        sr_errinfo_free(&err_info);
-        return;
+        return err_info;
     }
 
     /* properly remove the subscription from ext SHM */
     if ((err_info = sr_shmext_change_sub_del(subscr->conn, shm_mod, SR_LOCK_NONE, change_subs->ds,
             change_subs->subs[idx].sub_id))) {
-        sr_errinfo_free(&err_info);
+        return err_info;
     }
 
     /* remove the subscription from the subscription structure */
     sr_subscr_change_sub_del(subscr, change_subs->subs[idx].sub_id, has_subs_lock);
+
+    return NULL;
 }
 
 /**
@@ -978,8 +986,9 @@ sr_change_sub_del(sr_subscription_ctx_t *subscr, struct modsub_change_s *change_
  * @param[in] oper_subs Oper subscription in ext SHM.
  * @param[in] idx Index of the subscription in @p oper_subs to remove.
  * @param[in] has_subs_lock What kind of SUBS lock is held.
+ * @return err_info, NULL on success.
  */
-static void
+static sr_error_info_t *
 sr_oper_sub_del(sr_subscription_ctx_t *subscr, struct modsub_oper_s *oper_subs, uint32_t idx, sr_lock_mode_t has_subs_lock)
 {
     sr_error_info_t *err_info = NULL;
@@ -992,17 +1001,18 @@ sr_oper_sub_del(sr_subscription_ctx_t *subscr, struct modsub_oper_s *oper_subs, 
     shm_mod = sr_shmmain_find_module(SR_CONN_MAIN_SHM(subscr->conn), oper_subs->module_name);
     if (!shm_mod) {
         SR_ERRINFO_INT(&err_info);
-        sr_errinfo_free(&err_info);
-        return;
+        return err_info;
     }
 
     /* properly remove the subscription from ext SHM */
     if ((err_info = sr_shmext_oper_sub_del(subscr->conn, shm_mod, oper_subs->subs[idx].sub_id))) {
-        sr_errinfo_free(&err_info);
+        return err_info;
     }
 
     /* remove the subscription from the subscription structure */
     sr_subscr_oper_sub_del(subscr, oper_subs->subs[idx].sub_id, has_subs_lock);
+
+    return NULL;
 }
 
 /**
@@ -1013,8 +1023,9 @@ sr_oper_sub_del(sr_subscription_ctx_t *subscr, struct modsub_oper_s *oper_subs, 
  * @param[in] rpc_subs RPC/action subscription in ext SHM.
  * @param[in] idx Index of the subscription in @p rpc_subs to remove.
  * @param[in] has_subs_lock What kind of SUBS lock is held.
+ * @return err_info, NULL on success.
  */
-static void
+static sr_error_info_t *
 sr_rpc_sub_del(sr_subscription_ctx_t *subscr, struct opsub_rpc_s *rpc_subs, uint32_t idx, sr_lock_mode_t has_subs_lock)
 {
     sr_error_info_t *err_info = NULL;
@@ -1027,17 +1038,18 @@ sr_rpc_sub_del(sr_subscription_ctx_t *subscr, struct opsub_rpc_s *rpc_subs, uint
     shm_rpc = sr_shmmain_find_rpc(SR_CONN_MAIN_SHM(subscr->conn), rpc_subs->path);
     if (!shm_rpc) {
         SR_ERRINFO_INT(&err_info);
-        sr_errinfo_free(&err_info);
-        return;
+        return err_info;
     }
 
     /* properly remove the subscription from the main SHM */
     if ((err_info = sr_shmext_rpc_sub_del(subscr->conn, shm_rpc, rpc_subs->subs[idx].sub_id))) {
-        sr_errinfo_free(&err_info);
+        return err_info;
     }
 
     /* remove the subscription from the subscription structure */
     sr_subscr_rpc_sub_del(subscr, rpc_subs->subs[idx].sub_id, has_subs_lock);
+
+    return NULL;
 }
 
 /**
@@ -1048,8 +1060,9 @@ sr_rpc_sub_del(sr_subscription_ctx_t *subscr, struct opsub_rpc_s *rpc_subs, uint
  * @param[in] notif_subs Notif subscription in ext SHM.
  * @param[in] idx Index of the subscription in @p notif_subs to remove.
  * @param[in] has_subs_lock What kind of SUBS lock is held.
+ * @return err_info, NULL on success.
  */
-static void
+static sr_error_info_t *
 sr_notif_sub_del(sr_subscription_ctx_t *subscr, struct modsub_notif_s *notif_subs, uint32_t idx,
         sr_lock_mode_t has_subs_lock)
 {
@@ -1063,17 +1076,18 @@ sr_notif_sub_del(sr_subscription_ctx_t *subscr, struct modsub_notif_s *notif_sub
     shm_mod = sr_shmmain_find_module(SR_CONN_MAIN_SHM(subscr->conn), notif_subs->module_name);
     if (!shm_mod) {
         SR_ERRINFO_INT(&err_info);
-        sr_errinfo_free(&err_info);
-        return;
+        return err_info;
     }
 
     /* properly remove the subscription from ext SHM */
     if ((err_info = sr_shmext_notif_sub_del(subscr->conn, shm_mod, notif_subs->subs[idx].sub_id))) {
-        sr_errinfo_free(&err_info);
+        return err_info;
     }
 
     /* remove the subscription from the subscription structure */
     sr_subscr_notif_sub_del(subscr, notif_subs->subs[idx].sub_id, has_subs_lock);
+
+    return NULL;
 }
 
 sr_error_info_t *
@@ -1097,12 +1111,6 @@ sr_subscr_session_del(sr_subscription_ctx_t *subscr, sr_session_ctx_t *sess, sr_
         }
     }
 
-    /* remove ourselves from session subscriptions (needs SUBS lock to avoid removing it twice in case of reaching
-     * a notification stop time) */
-    if ((err_info = sr_ptr_del(&sess->ptr_lock, (void ***)&sess->subscriptions, &sess->subscription_count, subscr))) {
-        goto cleanup_subs_unlock;
-    }
-
     /* change subscriptions */
     i = 0;
     while (i < subscr->change_sub_count) {
@@ -1112,7 +1120,9 @@ sr_subscr_session_del(sr_subscription_ctx_t *subscr, sr_session_ctx_t *sess, sr_
         for (j = 0; j < change_subs->sub_count; ++j) {
             if (change_subs->subs[j].sess == sess) {
                 /* remove */
-                sr_change_sub_del(subscr, change_subs, j, SR_LOCK_READ_UPGR);
+                if ((err_info = sr_change_sub_del(subscr, change_subs, j, SR_LOCK_READ_UPGR))) {
+                    goto cleanup_subs_unlock;
+                }
                 del = 1;
                 break;
             }
@@ -1133,7 +1143,9 @@ sr_subscr_session_del(sr_subscription_ctx_t *subscr, sr_session_ctx_t *sess, sr_
         for (j = 0; j < oper_subs->sub_count; ++j) {
             if (oper_subs->subs[j].sess == sess) {
                 /* remove */
-                sr_oper_sub_del(subscr, oper_subs, j, SR_LOCK_READ_UPGR);
+                if ((err_info = sr_oper_sub_del(subscr, oper_subs, j, SR_LOCK_READ_UPGR))) {
+                    goto cleanup_subs_unlock;
+                }
                 del = 1;
                 break;
             }
@@ -1154,7 +1166,9 @@ sr_subscr_session_del(sr_subscription_ctx_t *subscr, sr_session_ctx_t *sess, sr_
         for (j = 0; j < notif_subs->sub_count; ++j) {
             if (notif_subs->subs[j].sess == sess) {
                 /* remove */
-                sr_notif_sub_del(subscr, notif_subs, j, SR_LOCK_READ_UPGR);
+                if ((err_info = sr_notif_sub_del(subscr, notif_subs, j, SR_LOCK_READ_UPGR))) {
+                    goto cleanup_subs_unlock;
+                }
                 del = 1;
                 break;
             }
@@ -1175,7 +1189,9 @@ sr_subscr_session_del(sr_subscription_ctx_t *subscr, sr_session_ctx_t *sess, sr_
         for (j = 0; j < rpc_subs->sub_count; ++j) {
             if (rpc_subs->subs[j].sess == sess) {
                 /* remove */
-                sr_rpc_sub_del(subscr, rpc_subs, j, SR_LOCK_READ_UPGR);
+                if ((err_info = sr_rpc_sub_del(subscr, rpc_subs, j, SR_LOCK_READ_UPGR))) {
+                    goto cleanup_subs_unlock;
+                }
                 del = 1;
                 break;
             }
@@ -1185,6 +1201,12 @@ sr_subscr_session_del(sr_subscription_ctx_t *subscr, sr_session_ctx_t *sess, sr_
         if (!del) {
             ++i;
         }
+    }
+
+    /* remove ourselves from session subscriptions (needs SUBS lock to avoid removing it twice in case of reaching
+     * a notification stop time) */
+    if ((err_info = sr_ptr_del(&sess->ptr_lock, (void ***)&sess->subscriptions, &sess->subscription_count, subscr))) {
+        goto cleanup_subs_unlock;
     }
 
 cleanup_subs_unlock:
@@ -1199,7 +1221,7 @@ cleanup_subs_unlock:
 sr_error_info_t *
 sr_subscr_del(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_lock_mode_t has_subs_lock)
 {
-    sr_error_info_t *err_info = NULL, *tmp_err;
+    sr_error_info_t *err_info = NULL;
     uint32_t i, j;
     sr_session_ctx_t *del_sub_sess = NULL;
     struct modsub_change_s *change_subs;
@@ -1227,8 +1249,10 @@ subs_del:
                 if (change_subs->subs[j].sub_id == sub_id) {
                     /* found it */
                     del_sub_sess = change_subs->subs[j].sess;
-                    sr_change_sub_del(subscr, change_subs, j, SR_LOCK_READ_UPGR);
-                    goto cleanup;
+                    if ((err_info = sr_change_sub_del(subscr, change_subs, j, SR_LOCK_READ_UPGR))) {
+                        goto cleanup;
+                    }
+                    goto finish;
                 } else {
                     continue;
                 }
@@ -1251,8 +1275,10 @@ subs_del:
                 if (oper_subs->subs[j].sub_id == sub_id) {
                     /* found it */
                     del_sub_sess = oper_subs->subs[j].sess;
-                    sr_oper_sub_del(subscr, oper_subs, j, SR_LOCK_READ_UPGR);
-                    goto cleanup;
+                    if ((err_info = sr_oper_sub_del(subscr, oper_subs, j, SR_LOCK_READ_UPGR))) {
+                        goto cleanup;
+                    }
+                    goto finish;
                 } else {
                     continue;
                 }
@@ -1275,8 +1301,10 @@ subs_del:
                 if (notif_subs->subs[j].sub_id == sub_id) {
                     /* found it */
                     del_sub_sess = notif_subs->subs[j].sess;
-                    sr_notif_sub_del(subscr, notif_subs, j, SR_LOCK_READ_UPGR);
-                    goto cleanup;
+                    if ((err_info = sr_notif_sub_del(subscr, notif_subs, j, SR_LOCK_READ_UPGR))) {
+                        goto cleanup;
+                    }
+                    goto finish;
                 } else {
                     continue;
                 }
@@ -1299,8 +1327,10 @@ subs_del:
                 if (rpc_subs->subs[j].sub_id == sub_id) {
                     /* found it */
                     del_sub_sess = rpc_subs->subs[j].sess;
-                    sr_rpc_sub_del(subscr, rpc_subs, j, SR_LOCK_READ_UPGR);
-                    goto cleanup;
+                    if ((err_info = sr_rpc_sub_del(subscr, rpc_subs, j, SR_LOCK_READ_UPGR))) {
+                        goto cleanup;
+                    }
+                    goto finish;
                 } else {
                     continue;
                 }
@@ -1314,14 +1344,14 @@ subs_del:
         }
     }
 
-cleanup:
+finish:
     if (sub_id) {
         if (del_sub_sess) {
             /* remove the subscription from the session if the only subscription */
             if (!sr_subscr_session_count(subscr, del_sub_sess, SR_LOCK_READ_UPGR)) {
-                if ((tmp_err = sr_ptr_del(&del_sub_sess->ptr_lock, (void ***)&del_sub_sess->subscriptions,
+                if ((err_info = sr_ptr_del(&del_sub_sess->ptr_lock, (void ***)&del_sub_sess->subscriptions,
                         &del_sub_sess->subscription_count, subscr))) {
-                    sr_errinfo_merge(&err_info, tmp_err);
+                    goto cleanup;
                 }
             }
         } else {
@@ -1329,6 +1359,7 @@ cleanup:
         }
     }
 
+cleanup:
     if (has_subs_lock == SR_LOCK_NONE) {
         /* SUBS READ UPGR UNLOCK */
         sr_rwunlock(&subscr->subs_lock, SR_SUBSCR_LOCK_TIMEOUT, SR_LOCK_READ_UPGR, subscr->conn->cid, __func__);
@@ -1519,7 +1550,8 @@ sr_ly_ctx_new(struct ly_ctx **ly_ctx)
     if ((err_info = sr_path_yang_dir(&yang_dir))) {
         goto cleanup;
     }
-    lyrc = ly_ctx_new(yang_dir, LY_CTX_NO_YANGLIBRARY | LY_CTX_DISABLE_SEARCHDIR_CWD | LY_CTX_REF_IMPLEMENTED, ly_ctx);
+    lyrc = ly_ctx_new(yang_dir, LY_CTX_NO_YANGLIBRARY | LY_CTX_DISABLE_SEARCHDIR_CWD | LY_CTX_REF_IMPLEMENTED |
+            LY_CTX_EXPLICIT_COMPILE, ly_ctx);
     free(yang_dir);
 
     if (lyrc) {
@@ -1592,12 +1624,20 @@ cleanup:
 }
 
 sr_error_info_t *
-sr_remove_module_file(const char *name, const char *revision)
+sr_remove_module_file_r(const struct lys_module *ly_mod, const struct ly_ctx *new_ctx)
 {
     sr_error_info_t *err_info = NULL;
     char *path;
+    const struct lysp_module *pmod;
+    LY_ARRAY_COUNT_TYPE u;
 
-    if ((err_info = sr_path_yang_file(name, revision, &path))) {
+    if (sr_module_is_internal(ly_mod) || ly_ctx_get_module(new_ctx, ly_mod->name, ly_mod->revision)) {
+        /* internal or still in the context, cannot be removed */
+        return NULL;
+    }
+
+    /* remove main module file */
+    if ((err_info = sr_path_yang_file(ly_mod->name, ly_mod->revision, &path))) {
         return err_info;
     }
 
@@ -1606,10 +1646,32 @@ sr_remove_module_file(const char *name, const char *revision)
     } else {
         SR_LOG_INF("File \"%s\" was removed.", strrchr(path, '/') + 1);
     }
-
-    /* we are not able to remove submodule files, unfortunately */
-
     free(path);
+
+    pmod = ly_mod->parsed;
+
+    /* remove all submodule files */
+    LY_ARRAY_FOR(pmod->includes, u) {
+        if ((err_info = sr_path_yang_file(pmod->includes[u].submodule->name,
+                pmod->includes[u].submodule->revs ? pmod->includes[u].submodule->revs[0].date : NULL, &path))) {
+            return err_info;
+        }
+
+        if (unlink(path) == -1) {
+            SR_LOG_WRN("Failed to remove \"%s\" (%s).", path, strerror(errno));
+        } else {
+            SR_LOG_INF("File \"%s\" was removed.", strrchr(path, '/') + 1);
+        }
+        free(path);
+    }
+
+    /* remove all (unused) imports recursively */
+    LY_ARRAY_FOR(pmod->imports, u) {
+        if ((err_info = sr_remove_module_file_r(pmod->imports[u].module, new_ctx))) {
+            return err_info;
+        }
+    }
+
     return NULL;
 }
 
@@ -1825,8 +1887,13 @@ sr_create_module_imps_incs_r(const struct lys_module *ly_mod, const struct lysp_
         }
     }
 
+    if (lysp_submod) {
+        /* all submodules are in the main module */
+        return NULL;
+    }
+
     /* store all includes */
-    includes = (lysp_submod ? lysp_submod->includes : ly_mod->parsed->includes);
+    includes = ly_mod->parsed->includes;
     LY_ARRAY_FOR(includes, u) {
         if ((err_info = sr_store_module_file(ly_mod, includes[u].submodule))) {
             return err_info;
@@ -2309,7 +2376,7 @@ sr_chmodown(const char *path, const char *owner, const char *group, mode_t perm)
 
     assert(path);
 
-    if ((int)perm != -1) {
+    if (perm != (mode_t)(-1)) {
         if (perm > 00777) {
             sr_errinfo_new(&err_info, SR_ERR_INVAL_ARG, "Invalid permissions 0%.3o.", perm);
             return err_info;
@@ -2331,7 +2398,7 @@ sr_chmodown(const char *path, const char *owner, const char *group, mode_t perm)
 
     /* apply owner changes, if any */
     if (chown(path, uid, gid) == -1) {
-        if ((errno == EACCES) || (errno = EPERM)) {
+        if ((errno == EACCES) || (errno == EPERM)) {
             err_code = SR_ERR_UNAUTHORIZED;
         } else {
             err_code = SR_ERR_INTERNAL;
@@ -2341,8 +2408,8 @@ sr_chmodown(const char *path, const char *owner, const char *group, mode_t perm)
     }
 
     /* apply permission changes, if any */
-    if (((int)perm != -1) && (chmod(path, perm) == -1)) {
-        if ((errno == EACCES) || (errno = EPERM)) {
+    if ((perm != (mode_t)(-1)) && (chmod(path, perm) == -1)) {
+        if ((errno == EACCES) || (errno == EPERM)) {
             err_code = SR_ERR_UNAUTHORIZED;
         } else {
             err_code = SR_ERR_INTERNAL;
@@ -2492,6 +2559,50 @@ sr_time_get(struct timespec *ts, uint32_t add_ms)
     ts->tv_sec += add_ms / 1000;
 }
 
+int
+sr_time_cmp(const struct timespec *ts1, const struct timespec *ts2)
+{
+    /* seconds diff */
+    if (ts1->tv_sec > ts2->tv_sec) {
+        return 1;
+    } else if (ts1->tv_sec < ts2->tv_sec) {
+        return -1;
+    }
+
+    /* nanoseconds diff */
+    if (ts1->tv_nsec > ts2->tv_nsec) {
+        return 1;
+    } else if (ts1->tv_nsec < ts2->tv_nsec) {
+        return -1;
+    }
+
+    return 0;
+}
+
+struct timespec
+sr_time_sub(const struct timespec *ts1, const struct timespec *ts2)
+{
+    struct timespec result;
+
+    if ((ts1->tv_sec < ts2->tv_sec) || ((ts1->tv_sec == ts2->tv_sec) && (ts1->tv_nsec < ts2->tv_nsec))) {
+        /* negative result */
+        result.tv_sec = 0;
+        result.tv_nsec = -1;
+        return result;
+    }
+
+    result.tv_sec = ts1->tv_sec - ts2->tv_sec;
+    if (ts1->tv_nsec < ts2->tv_nsec) {
+        /* nsec underflow */
+        --result.tv_sec;
+        result.tv_nsec = (ts1->tv_nsec + 1000000000) - ts2->tv_nsec;
+    } else {
+        result.tv_nsec = ts1->tv_nsec - ts2->tv_nsec;
+    }
+
+    return result;
+}
+
 sr_error_info_t *
 sr_shm_remap(sr_shm_t *shm, size_t new_shm_size)
 {
@@ -2611,6 +2722,11 @@ sr_ext_hole_add(sr_ext_shm_t *ext_shm, uint32_t off, uint32_t size)
 {
     sr_ext_hole_t *next, *prev = NULL, *hole;
     int con_prev = 0, con_next = 0;
+
+    if (!size) {
+        /* nothing to do */
+        return;
+    }
 
     for (next = sr_ext_hole_next(NULL, ext_shm); next; next = sr_ext_hole_next(next, ext_shm)) {
         if ((char *)next - (char *)ext_shm > off) {
@@ -2902,6 +3018,9 @@ sr_shmrealloc(sr_shm_t *shm_ext, off_t *dyn_attr_off, int in_ext_shm, size_t cur
         } else {
             sr_shmrealloc_use_hole(ext_shm, con_attr_hole, new_size - cur_size);
         }
+    } else if (new_size < cur_size) {
+        /* size is smaller, empty space (hole) is created */
+        sr_ext_hole_add(ext_shm, *dyn_attr_off + new_size, cur_size - new_size);
     }
 
     /*
@@ -3307,7 +3426,7 @@ sr_rwlock_reader_add(sr_rwlock_t *rwlock, sr_cid_t cid)
     }
 
     /* find first free item */
-    for (i = 0; rwlock->readers[i] && (i < SR_RWLOCK_READ_LIMIT); ++i) {}
+    for (i = 0; (i < SR_RWLOCK_READ_LIMIT) && rwlock->readers[i]; ++i) {}
     if (i == SR_RWLOCK_READ_LIMIT) {
         sr_errinfo_new(&err_info, SR_ERR_INTERNAL, "Concurrent reader limit %d reached!", SR_RWLOCK_READ_LIMIT);
         sr_errinfo_free(&err_info);
@@ -3358,7 +3477,7 @@ sr_rwlock_reader_del(sr_rwlock_t *rwlock, sr_cid_t cid)
     }
 
     /* find a CID match */
-    for (i = 0; rwlock->readers[i] && (rwlock->readers[i] != cid) && (i < SR_RWLOCK_READ_LIMIT); ++i) {}
+    for (i = 0; (i < SR_RWLOCK_READ_LIMIT) && rwlock->readers[i] && (rwlock->readers[i] != cid); ++i) {}
     if ((i == SR_RWLOCK_READ_LIMIT) || (rwlock->readers[i] != cid)) {
         /* CID not found */
         SR_ERRINFO_INT(&err_info);
@@ -3392,7 +3511,7 @@ sr_rwlock_recover(sr_rwlock_t *rwlock, const char *func, sr_lock_recover_cb cb, 
     sr_cid_t cid;
 
     /* readers */
-    while (rwlock->readers[i] && (i < SR_RWLOCK_READ_LIMIT)) {
+    while ((i < SR_RWLOCK_READ_LIMIT) && rwlock->readers[i]) {
         if (!sr_conn_is_alive(rwlock->readers[i])) {
             /* remove the dead reader */
             cid = rwlock->readers[i];
@@ -3834,7 +3953,7 @@ sr_path_set_group(const char *path)
 
     /* set correct GID */
     if (chown(path, -1, sr_gid) == -1) {
-        if ((errno == EACCES) || (errno = EPERM)) {
+        if ((errno == EACCES) || (errno == EPERM)) {
             err_code = SR_ERR_UNAUTHORIZED;
         } else {
             err_code = SR_ERR_INTERNAL;
@@ -4054,7 +4173,7 @@ sr_msleep(uint32_t msec)
 
     do {
         ret = nanosleep(&ts, &ts);
-    } while ((ret == -1) && (errno = EINTR));
+    } while ((ret == -1) && (errno == EINTR));
 
     if (ret == -1) {
         SR_ERRINFO_SYSERRNO(&err_info, "nanosleep");
@@ -4597,34 +4716,42 @@ sr_lyd_dup_module_np_cont(const struct lyd_node *data, const struct lys_module *
 }
 
 sr_error_info_t *
-sr_lyd_dup_module_data(const struct lyd_node *data, const struct lys_module *ly_mod, int add_state_np_conts,
+sr_lyd_get_module_data(struct lyd_node **data, const struct lys_module *ly_mod, int add_state_np_conts, int dup,
         struct lyd_node **new_data)
 {
     sr_error_info_t *err_info = NULL;
-    struct lyd_node *dup;
-    const struct lyd_node *node;
+    struct lyd_node *node, *next, *subtree;
 
     assert(ly_mod && new_data);
 
-    LY_LIST_FOR(data, node) {
+    LY_LIST_FOR_SAFE(*data, next, node) {
         if (lyd_owner_module(node) == ly_mod) {
-            /* duplicate node */
-            if (lyd_dup_single(node, NULL, LYD_DUP_RECURSIVE | LYD_DUP_WITH_FLAGS, &dup)) {
-                sr_errinfo_new_ly(&err_info, ly_mod->ctx);
-                return err_info;
+            if (dup) {
+                /* duplicate subtree */
+                if (lyd_dup_single(node, NULL, LYD_DUP_RECURSIVE | LYD_DUP_WITH_FLAGS, &subtree)) {
+                    sr_errinfo_new_ly(&err_info, ly_mod->ctx);
+                    return err_info;
+                }
+            } else {
+                /* unlink subtree */
+                if (*data == node) {
+                    *data = (*data)->next;
+                }
+                lyd_unlink_tree(node);
+                subtree = node;
             }
 
             if (add_state_np_conts) {
                 /* add any nested state NP containers */
-                if (lyd_new_implicit_tree(dup, LYD_IMPLICIT_NO_CONFIG | LYD_IMPLICIT_NO_DEFAULTS, NULL)) {
+                if (lyd_new_implicit_tree(subtree, LYD_IMPLICIT_NO_CONFIG | LYD_IMPLICIT_NO_DEFAULTS, NULL)) {
                     sr_errinfo_new_ly(&err_info, ly_mod->ctx);
                     return err_info;
                 }
             }
 
             /* connect it to any other data */
-            if (lyd_merge_tree(new_data, dup, LYD_MERGE_DESTRUCT)) {
-                lyd_free_tree(dup);
+            if (lyd_merge_tree(new_data, subtree, LYD_MERGE_DESTRUCT | LYD_MERGE_WITH_FLAGS)) {
+                lyd_free_tree(subtree);
                 sr_errinfo_new_ly(&err_info, ly_mod->ctx);
                 return err_info;
             }
@@ -4634,12 +4761,36 @@ sr_lyd_dup_module_data(const struct lyd_node *data, const struct lys_module *ly_
     return NULL;
 }
 
-sr_error_info_t *
-sr_lyd_dup_enabled_xpath(const struct lyd_node *data, char **xpaths, uint16_t xp_count, struct lyd_node **new_data)
+/**
+ * @brief Copy config NP containers as node and all of its parent siblings.
+ *
+ * @param[in] node Node to start copying to.
+ * @param[in] src Source node to copy from.
+ * @return err_info, NULL on success.
+ */
+static sr_error_info_t *
+sr_lyd_get_enabled_copy_config_np_cont(struct lyd_node *node, const struct lyd_node *src)
 {
     sr_error_info_t *err_info = NULL;
-    struct lyd_node *root;
-    const struct lyd_node *src;
+
+    while (node) {
+        if ((err_info = sr_lyd_copy_config_np_cont_r(NULL, node, src, lyd_owner_module(src)))) {
+            return err_info;
+        }
+
+        node = lyd_parent(node);
+        src = lyd_parent(src);
+    }
+
+    return NULL;
+}
+
+sr_error_info_t *
+sr_lyd_get_enabled_xpath(struct lyd_node **data, char **xpaths, uint16_t xp_count, int dup, struct lyd_node **new_data)
+{
+    sr_error_info_t *err_info = NULL;
+    const struct ly_ctx *ctx = LYD_CTX(*data);
+    struct lyd_node *root, *src, *parent;
     struct ly_set *cur_set, *set = NULL;
     size_t i;
     LY_ERR lyrc;
@@ -4651,8 +4802,8 @@ sr_lyd_dup_enabled_xpath(const struct lyd_node *data, char **xpaths, uint16_t xp
 
     /* get only the selected subtrees in a set */
     for (i = 0; i < xp_count; ++i) {
-        if (lyd_find_xpath(data, xpaths[i], &cur_set)) {
-            sr_errinfo_new_ly(&err_info, LYD_CTX(data));
+        if (lyd_find_xpath(*data, xpaths[i], &cur_set)) {
+            sr_errinfo_new_ly(&err_info, ctx);
             goto cleanup;
         }
 
@@ -4660,41 +4811,73 @@ sr_lyd_dup_enabled_xpath(const struct lyd_node *data, char **xpaths, uint16_t xp
         if (set) {
             lyrc = ly_set_merge(set, cur_set, 0, NULL);
             ly_set_free(cur_set, NULL);
-            SR_CHECK_LY_GOTO(lyrc, LYD_CTX(data), err_info, cleanup);
+            SR_CHECK_LY_GOTO(lyrc, ctx, err_info, cleanup);
         } else {
             set = cur_set;
         }
     }
 
     for (i = 0; i < set->count; ++i) {
-        /* duplicate filtered subtree */
+        /* get filtered subtree */
         src = set->dnodes[i];
-        if (lyd_dup_single(src, NULL, LYD_DUP_RECURSIVE | LYD_DUP_WITH_PARENTS | LYD_DUP_WITH_FLAGS, &root)) {
-            sr_errinfo_new_ly(&err_info, LYD_CTX(data));
-            goto cleanup;
-        }
 
-        /* go top-level and copy any config NP containers along the way */
-        while (root->parent) {
-            root = lyd_parent(root);
-            if ((err_info = sr_lyd_copy_config_np_cont_r(NULL, root, src, lyd_owner_module(set->dnodes[i])))) {
+        if (dup) {
+            /* duplicate the subtree with parents */
+            if (lyd_dup_single(src, NULL, LYD_DUP_RECURSIVE | LYD_DUP_WITH_PARENTS | LYD_DUP_WITH_FLAGS, &root)) {
+                sr_errinfo_new_ly(&err_info, ctx);
                 goto cleanup;
             }
 
-            /* src should be a sibling, not parent (so move it afterwards) */
-            src = lyd_parent(src);
+            /* copy any nested config NP containers */
+            if ((err_info = sr_lyd_get_enabled_copy_config_np_cont(lyd_parent(root), src))) {
+                goto cleanup;
+            }
+        } else {
+            /* duplicate only the parents */
+            parent = NULL;
+            if (src->parent) {
+                if (lyd_dup_single(lyd_parent(src), NULL, LYD_DUP_WITH_PARENTS | LYD_DUP_WITH_FLAGS, &parent)) {
+                    sr_errinfo_new_ly(&err_info, ctx);
+                    goto cleanup;
+                }
+            }
+
+            /* copy any nested config NP containers */
+            if ((err_info = sr_lyd_get_enabled_copy_config_np_cont(parent, src))) {
+                goto cleanup;
+            }
+
+            /* we can unlink the subtree now */
+            if (*data == src) {
+                /* unlinking data, move it */
+                *data = (*data)->next;
+            }
+
+            /* relink into parent, if any */
+            lyd_unlink_tree(src);
+            if (parent && lyd_insert_child(parent, src)) {
+                sr_errinfo_new_ly(&err_info, ctx);
+                goto cleanup;
+            }
+
+            root = src;
+        }
+
+        /* find top-level root */
+        while (root->parent) {
+            root = lyd_parent(root);
         }
 
         /* add any state NP containers */
         if (lyd_new_implicit_tree(root, LYD_IMPLICIT_NO_DEFAULTS, NULL)) {
-            sr_errinfo_new_ly(&err_info, LYD_CTX(data));
+            sr_errinfo_new_ly(&err_info, ctx);
             goto cleanup;
         }
 
         /* merge into the final result */
         if (lyd_merge_tree(new_data, root, LYD_MERGE_DESTRUCT)) {
             lyd_free_all(root);
-            sr_errinfo_new_ly(&err_info, LYD_CTX(data));
+            sr_errinfo_new_ly(&err_info, ctx);
             goto cleanup;
         }
     }
@@ -5172,7 +5355,7 @@ retry_open:
     }
 
     /* load the data */
-    if (lyd_parse_data_fd(ly_mod->ctx, fd, LYD_LYB, LYD_PARSE_ONLY | LYD_PARSE_STRICT, 0, &mod_data)) {
+    if (lyd_parse_data_fd(ly_mod->ctx, fd, LYD_LYB, LYD_PARSE_ONLY | LYD_PARSE_STRICT | LYD_PARSE_ORDERED, 0, &mod_data)) {
         sr_errinfo_new_ly(&err_info, ly_mod->ctx);
         goto error;
     }

@@ -137,6 +137,9 @@ int pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *absti
 /** timeout for locking (data of) a module; maximum time a module write lock is expected to be held (ms) */
 #define SR_MOD_LOCK_TIMEOUT 5000
 
+/** timeout for locking DS lock mutex of a module; is held only when accessing the DS lock information (ms) */
+#define SR_DS_LOCK_TIMEOUT 100
+
 /** timeout for locking SHM module/RPC subscriptions; maxmum time full event processing may take (ms) */
 #define SR_SHMEXT_SUB_LOCK_TIMEOUT 15000
 
@@ -299,8 +302,9 @@ void sr_subscr_oper_sub_del(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_l
  * @param[in] sess Subscription session.
  * @param[in] mod_name Subscription module name.
  * @param[in] xpath Subscription XPath.
- * @param[in] start_time Subscription start time.
- * @param[in] stop_time Subscription stop time.
+ * @param[in] listen_since Timestamp of the subscription starting to listen.
+ * @param[in] start_time Optional subscription start time.
+ * @param[in] stop_time Optional subscription stop time.
  * @param[in] notif_cb Subscription value callback.
  * @param[in] notif_tree_cb Subscription tree callback.
  * @param[in] private_data Subscription callback private data.
@@ -308,8 +312,9 @@ void sr_subscr_oper_sub_del(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_l
  * @return err_info, NULL on success.
  */
 sr_error_info_t *sr_subscr_notif_sub_add(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_session_ctx_t *sess,
-        const char *mod_name, const char *xpath, time_t start_time, time_t stop_time, sr_event_notif_cb notif_cb,
-        sr_event_notif_tree_cb notif_tree_cb, void *private_data, sr_lock_mode_t has_subs_lock);
+        const char *mod_name, const char *xpath, const struct timespec *listen_since, const struct timespec *start_time,
+        const struct timespec *stop_time, sr_event_notif_cb notif_cb, sr_event_notif_tree_cb notif_tree_cb,
+        void *private_data, sr_lock_mode_t has_subs_lock);
 
 /**
  * @brief Delete a notification subscription from a subscription structure.
@@ -485,13 +490,13 @@ sr_error_info_t *sr_ptr_del(pthread_mutex_t *ptr_lock, void ***ptrs, uint32_t *p
 sr_error_info_t *sr_ly_ctx_new(struct ly_ctx **ly_ctx);
 
 /**
- * @brief Remove module YANG file.
+ * @brief Remove all unused module YANG file(s) and all of its includes/imports recursively.
  *
- * @param[in] name Module name.
- * @param[in] revision Module revision, NULL if none.
+ * @param[in] ly_mod Module whose files to remove.
+ * @param[in] new_ctx New context without @p ly_mod.
  * @return err_info, NULL on success.
  */
-sr_error_info_t *sr_remove_module_file(const char *name, const char *revision);
+sr_error_info_t *sr_remove_module_file_r(const struct lys_module *ly_mod, const struct ly_ctx *new_ctx);
 
 /**
  * @brief Create (print) YANG module file and all of its submodules.
@@ -729,6 +734,27 @@ int sr_file_exists(const char *path);
  * @param[in] add_ms Number os milliseconds added.
  */
 void sr_time_get(struct timespec *ts, uint32_t add_ms);
+
+/**
+ * @brief Compare 2 timespec structures.
+ *
+ * @param[in] ts1 First timespec.
+ * @param[in] ts2 Second timespec.
+ * @return 0, if the @p ts1 and @p ts2 are equal;
+ * @return a negative value if @p ts1 is sooner (smaller) than @p ts2;
+ * @return a positive value if @p ts1 is later (larger) than @p ts2.
+ */
+int sr_time_cmp(const struct timespec *ts1, const struct timespec *ts2);
+
+/**
+ * @brief Subtract a timespec from another.
+ *
+ * @param[in] ts1 First timespec to be subtracted from.
+ * @param[in] ts2 Second timespec to subtract.
+ * @return Result of @p ts1 - @p ts2.
+ * @return 0 seconds and -1 nanoseconds if @p ts1 < @p ts2.
+ */
+struct timespec sr_time_sub(const struct timespec *ts1, const struct timespec *ts2);
 
 /**
  * @brief Remap and possibly resize a SHM. Needs WRITE lock for resizing,
@@ -1200,26 +1226,28 @@ sr_error_info_t *sr_lyd_dup_module_np_cont(const struct lyd_node *data, const st
  * @brief Duplicate all data of a module from a data tree. Also properly handles config NP containers
  * and optionally even state NP containers.
  *
- * @param[in] data Data tree to duplicate from.
+ * @param[in,out] data Data tree to get data from, are unlinked from if @p dup is 0.
  * @param[in] ly_mod Module whose data to duplicate.
  * @param[in] add_state_np_conts Whether to also add state NP containers.
+ * @param[in] dup Whether to duplicate data or only unlink.
  * @param[in,out] new_data Data with appended duplicated nodes.
  * @return err_info, NULL on success.
  */
-sr_error_info_t *sr_lyd_dup_module_data(const struct lyd_node *data, const struct lys_module *ly_mod,
-        int add_state_np_conts, struct lyd_node **new_data);
+sr_error_info_t *sr_lyd_get_module_data(struct lyd_node **data, const struct lys_module *ly_mod,
+        int add_state_np_conts, int dup, struct lyd_node **new_data);
 
 /**
  * @brief Duplicate selected nodes from a data tree. Also properly handles config/state NP containers.
  * Works well even for XPaths with intersections.
  *
- * @param[in] data Data tree to duplicate from.
+ * @param[in,out] data Data tree to get data from, are unlinked from if @p dup is 0.
  * @param[in] xpaths Array of XPaths that will select the duplicated nodes.
  * @param[in] xp_count XPath count.
- * @param[in,out] new_data Data with appended duplicated selected nodes.
+ * @param[in] dup Whether to duplicate data or only unlink.
+ * @param[in,out] new_data Data with the selected nodes appended.
  * @return err_info, NULL on success.
  */
-sr_error_info_t *sr_lyd_dup_enabled_xpath(const struct lyd_node *data, char **xpaths, uint16_t xp_count,
+sr_error_info_t *sr_lyd_get_enabled_xpath(struct lyd_node **data, char **xpaths, uint16_t xp_count, int dup,
         struct lyd_node **new_data);
 
 /**

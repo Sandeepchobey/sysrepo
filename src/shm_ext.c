@@ -22,6 +22,7 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -197,6 +198,43 @@ sr_shmext_print_cmp(const void *ptr1, const void *ptr2)
     return 0;
 }
 
+/**
+ * @brief Add new item for ext SHM print.
+ *
+ * @param[in,out] items Items array.
+ * @param[in,out] item_count Count of @p items.
+ * @param[in] start Start offset of the new item.
+ * @param[in] size Size of the new item.
+ * @param[in] name_format Name format string of the new item.
+ * @param[in] ... Parameters of @p name_format.
+ * @return SR_ERR value.
+ */
+static int
+sr_shmext_print_add_item(struct shm_item **items, size_t *item_count, off_t start, size_t size,
+        const char *name_format, ...)
+{
+    va_list ap;
+    int rc;
+
+    *items = sr_realloc(*items, (*item_count + 1) * sizeof **items);
+    if (!*items) {
+        return SR_ERR_NO_MEMORY;
+    }
+
+    (*items)[*item_count].start = start;
+    (*items)[*item_count].size = size;
+
+    va_start(ap, name_format);
+    rc = vasprintf(&((*items)[*item_count].name), name_format, ap);
+    va_end(ap);
+    if (rc == -1) {
+        return SR_ERR_NO_MEMORY;
+    }
+
+    ++(*item_count);
+    return SR_ERR_OK;
+}
+
 void
 sr_shmext_print(sr_main_shm_t *main_shm, sr_shm_t *shm_ext)
 {
@@ -206,8 +244,8 @@ sr_shmext_print(sr_main_shm_t *main_shm, sr_shm_t *shm_ext)
     sr_mod_oper_sub_t *oper_subs;
     sr_rpc_t *shm_rpc;
     sr_mod_rpc_sub_t *rpc_subs;
-    struct shm_item *items;
-    size_t idx, i, j, item_count, printed;
+    struct shm_item *items = NULL;
+    size_t idx, i, j, item_count = 0, printed;
     sr_datastore_t ds;
     int msg_len = 0;
     char *msg;
@@ -220,20 +258,16 @@ sr_shmext_print(sr_main_shm_t *main_shm, sr_shm_t *shm_ext)
     }
 
     /* the structure itself */
-    item_count = 0;
-    items = malloc(sizeof *items);
-    items[item_count].start = 0;
-    items[item_count].size = SR_SHM_SIZE(sizeof(sr_ext_shm_t));
-    asprintf(&(items[item_count].name), "ext structure");
-    ++item_count;
+    if (sr_shmext_print_add_item(&items, &item_count, 0, SR_SHM_SIZE(sizeof(sr_ext_shm_t)), "ext structure")) {
+        goto error;
+    }
 
     /* add all memory holes */
     for (hole = sr_ext_hole_next(NULL, ext_shm); hole; hole = sr_ext_hole_next(hole, ext_shm)) {
-        items = sr_realloc(items, (item_count + 1) * sizeof *items);
-        items[item_count].start = ((char *)hole) - shm_ext->addr;
-        items[item_count].size = hole->size;
-        asprintf(&(items[item_count].name), "memory hole (size %" PRIu32 ")", hole->size);
-        ++item_count;
+        if (sr_shmext_print_add_item(&items, &item_count, ((char *)hole) - shm_ext->addr, hole->size,
+                "memory hole (size %" PRIu32 ")", hole->size)) {
+            goto error;
+        }
     }
 
     for (idx = 0; idx < main_shm->mod_count; ++idx) {
@@ -242,23 +276,23 @@ sr_shmext_print(sr_main_shm_t *main_shm, sr_shm_t *shm_ext)
         for (ds = 0; ds < SR_DS_COUNT; ++ds) {
             if (shm_mod->change_sub[ds].sub_count) {
                 /* add change subscriptions */
-                items = sr_realloc(items, (item_count + 1) * sizeof *items);
-                items[item_count].start = shm_mod->change_sub[ds].subs;
-                items[item_count].size = SR_SHM_SIZE(shm_mod->change_sub[ds].sub_count * sizeof *change_subs);
-                asprintf(&(items[item_count].name), "%s change subs (%" PRIu32 ", mod \"%s\")", sr_ds2str(ds),
-                        shm_mod->change_sub[ds].sub_count, ((char *)main_shm) + shm_mod->name);
-                ++item_count;
+                if (sr_shmext_print_add_item(&items, &item_count, shm_mod->change_sub[ds].subs,
+                        SR_SHM_SIZE(shm_mod->change_sub[ds].sub_count * sizeof *change_subs),
+                        "%s change subs (%" PRIu32 ", mod \"%s\")", sr_ds2str(ds), shm_mod->change_sub[ds].sub_count,
+                        ((char *)main_shm) + shm_mod->name)) {
+                    goto error;
+                }
 
                 /* add xpaths */
                 change_subs = (sr_mod_change_sub_t *)(shm_ext->addr + shm_mod->change_sub[ds].subs);
                 for (i = 0; i < shm_mod->change_sub[ds].sub_count; ++i) {
                     if (change_subs[i].xpath) {
-                        items = sr_realloc(items, (item_count + 1) * sizeof *items);
-                        items[item_count].start = change_subs[i].xpath;
-                        items[item_count].size = sr_strshmlen(shm_ext->addr + change_subs[i].xpath);
-                        asprintf(&(items[item_count].name), "%s change sub xpath (\"%s\", mod \"%s\")", sr_ds2str(ds),
-                                shm_ext->addr + change_subs[i].xpath, ((char *)main_shm) + shm_mod->name);
-                        ++item_count;
+                        if (sr_shmext_print_add_item(&items, &item_count, change_subs[i].xpath,
+                                sr_strshmlen(shm_ext->addr + change_subs[i].xpath),
+                                "%s change sub xpath (\"%s\", mod \"%s\")", sr_ds2str(ds),
+                                shm_ext->addr + change_subs[i].xpath, ((char *)main_shm) + shm_mod->name)) {
+                            goto error;
+                        }
                     }
                 }
             }
@@ -266,22 +300,20 @@ sr_shmext_print(sr_main_shm_t *main_shm, sr_shm_t *shm_ext)
 
         if (shm_mod->oper_sub_count) {
             /* add oper subscriptions */
-            items = sr_realloc(items, (item_count + 1) * sizeof *items);
-            items[item_count].start = shm_mod->oper_subs;
-            items[item_count].size = SR_SHM_SIZE(shm_mod->oper_sub_count * sizeof *oper_subs);
-            asprintf(&(items[item_count].name), "oper subs (%" PRIu32 ", mod \"%s\")", shm_mod->oper_sub_count,
-                    ((char *)main_shm) + shm_mod->name);
-            ++item_count;
+            if (sr_shmext_print_add_item(&items, &item_count, shm_mod->oper_subs,
+                    SR_SHM_SIZE(shm_mod->oper_sub_count * sizeof *oper_subs), "oper subs (%" PRIu32 ", mod \"%s\")",
+                    shm_mod->oper_sub_count, ((char *)main_shm) + shm_mod->name)) {
+                goto error;
+            }
 
             /* add xpaths */
             oper_subs = (sr_mod_oper_sub_t *)(shm_ext->addr + shm_mod->oper_subs);
             for (i = 0; i < shm_mod->oper_sub_count; ++i) {
-                items = sr_realloc(items, (item_count + 1) * sizeof *items);
-                items[item_count].start = oper_subs[i].xpath;
-                items[item_count].size = sr_strshmlen(shm_ext->addr + oper_subs[i].xpath);
-                asprintf(&(items[item_count].name), "oper sub xpath (\"%s\", mod \"%s\")",
-                        shm_ext->addr + oper_subs[i].xpath, ((char *)main_shm) + shm_mod->name);
-                ++item_count;
+                if (sr_shmext_print_add_item(&items, &item_count, oper_subs[i].xpath,
+                        sr_strshmlen(shm_ext->addr + oper_subs[i].xpath), "oper sub xpath (\"%s\", mod \"%s\")",
+                        shm_ext->addr + oper_subs[i].xpath, ((char *)main_shm) + shm_mod->name)) {
+                    goto error;
+                }
             }
         }
 
@@ -289,34 +321,31 @@ sr_shmext_print(sr_main_shm_t *main_shm, sr_shm_t *shm_ext)
         for (i = 0; i < shm_mod->rpc_count; ++i) {
             if (shm_rpc[i].sub_count) {
                 /* add RPC subscriptions */
-                items = sr_realloc(items, (item_count + 1) * sizeof *items);
-                items[item_count].start = shm_rpc[i].subs;
-                items[item_count].size = SR_SHM_SIZE(shm_rpc[i].sub_count * sizeof *rpc_subs);
-                asprintf(&(items[item_count].name), "rpc subs (%" PRIu32 ", path \"%s\")", shm_rpc[i].sub_count,
-                        ((char *)main_shm) + shm_rpc[i].path);
-                ++item_count;
+                if (sr_shmext_print_add_item(&items, &item_count, shm_rpc[i].subs,
+                        SR_SHM_SIZE(shm_rpc[i].sub_count * sizeof *rpc_subs), "rpc subs (%" PRIu32 ", path \"%s\")",
+                        shm_rpc[i].sub_count, ((char *)main_shm) + shm_rpc[i].path)) {
+                    goto error;
+                }
 
                 rpc_subs = (sr_mod_rpc_sub_t *)(shm_ext->addr + shm_rpc[i].subs);
                 for (j = 0; j < shm_rpc[i].sub_count; ++j) {
                     /* add RPC subscription XPath */
-                    items = sr_realloc(items, (item_count + 1) * sizeof *items);
-                    items[item_count].start = rpc_subs[j].xpath;
-                    items[item_count].size = sr_strshmlen(shm_ext->addr + rpc_subs[j].xpath);
-                    asprintf(&(items[item_count].name), "rpc sub xpath (\"%s\", path \"%s\")",
-                            shm_ext->addr + rpc_subs[j].xpath, ((char *)main_shm) + shm_rpc[i].path);
-                    ++item_count;
+                    if (sr_shmext_print_add_item(&items, &item_count, rpc_subs[j].xpath,
+                            sr_strshmlen(shm_ext->addr + rpc_subs[j].xpath), "rpc sub xpath (\"%s\", path \"%s\")",
+                            shm_ext->addr + rpc_subs[j].xpath, ((char *)main_shm) + shm_rpc[i].path)) {
+                        goto error;
+                    }
                 }
             }
         }
 
         if (shm_mod->notif_sub_count) {
             /* add notif subscriptions */
-            items = sr_realloc(items, (item_count + 1) * sizeof *items);
-            items[item_count].start = shm_mod->notif_subs;
-            items[item_count].size = SR_SHM_SIZE(shm_mod->notif_sub_count * sizeof(sr_mod_notif_sub_t));
-            asprintf(&(items[item_count].name), "notif subs (%" PRIu32 ", mod \"%s\")", shm_mod->notif_sub_count,
-                    ((char *)main_shm) + shm_mod->name);
-            ++item_count;
+            if (sr_shmext_print_add_item(&items, &item_count, shm_mod->notif_subs,
+                    SR_SHM_SIZE(shm_mod->notif_sub_count * sizeof(sr_mod_notif_sub_t)),
+                    "notif subs (%" PRIu32 ", mod \"%s\")", shm_mod->notif_sub_count, ((char *)main_shm) + shm_mod->name)) {
+                goto error;
+            }
         }
     }
 
@@ -326,10 +355,8 @@ sr_shmext_print(sr_main_shm_t *main_shm, sr_shm_t *shm_ext)
     /* print it */
     printed = 0;
     for (i = 0; i < item_count; ++i) {
-        printed += sr_sprintf(&msg, &msg_len, printed, "%06ld-%06ld [%6lu]: %s\n",
-                items[i].start, items[i].start + items[i].size, items[i].size, items[i].name);
-
-        free(items[i].name);
+        printed += sr_sprintf(&msg, &msg_len, printed, "%06jd-%06jd [%6zu]: %s\n",
+                (intmax_t)items[i].start, (intmax_t)(items[i].start + items[i].size), items[i].size, items[i].name);
     }
 
     /* print all the information about SHM */
@@ -355,11 +382,21 @@ sr_shmext_print(sr_main_shm_t *main_shm, sr_shm_t *shm_ext)
         /* check alignment */
         assert(items[i].size == SR_SHM_SIZE(items[i].size));
         assert((unsigned)items[i].start == SR_SHM_SIZE(items[i].start));
+
+        /* free name */
+        free(items[i].name);
     }
     free(items);
 
     /* check that no item exists after the mapped segment */
     assert((unsigned)cur_off == shm_ext->size);
+    return;
+
+error:
+    for (i = 0; i < item_count; ++i) {
+        free(items[i].name);
+    }
+    free(items);
 }
 
 sr_error_info_t *
@@ -369,7 +406,7 @@ sr_shmext_change_sub_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, sr_lock_mode_t 
     sr_error_info_t *err_info = NULL;
     off_t xpath_off;
     sr_mod_change_sub_t *shm_sub;
-    uint16_t i;
+    uint32_t i;
 
     assert((has_lock == SR_LOCK_NONE) || (has_lock == SR_LOCK_WRITE));
 
@@ -463,7 +500,7 @@ sr_shmext_change_sub_modify(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, sr_datastore
 {
     sr_error_info_t *err_info = NULL;
     sr_mod_change_sub_t *shm_sub;
-    uint16_t i;
+    uint32_t i;
     int cur_size, new_size;
 
     /* CHANGE SUB WRITE LOCK */
@@ -490,17 +527,17 @@ sr_shmext_change_sub_modify(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, sr_datastore
     sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
 
     /* allocate memory for the new xpath, if any */
-    cur_size = shm_sub->xpath ? strlen(conn->ext_shm.addr + shm_sub->xpath) + 1 : 0;
+    cur_size = shm_sub[i].xpath ? strlen(conn->ext_shm.addr + shm_sub[i].xpath) + 1 : 0;
     new_size = xpath ? strlen(xpath) + 1 : 0;
-    if ((err_info = sr_shmrealloc(&conn->ext_shm, &shm_sub->xpath, 1, cur_size, new_size))) {
+    if ((err_info = sr_shmrealloc(&conn->ext_shm, &shm_sub[i].xpath, 1, cur_size, new_size))) {
         goto cleanup_changesub_ext_unlock;
     }
 
     /* fill new xpath */
     if (xpath) {
-        strcpy(conn->ext_shm.addr + shm_sub->xpath, xpath);
+        strcpy(conn->ext_shm.addr + shm_sub[i].xpath, xpath);
     } else {
-        shm_sub->xpath = 0;
+        shm_sub[i].xpath = 0;
     }
 
     SR_LOG_DBG("#SHM after (modifying change sub)");
@@ -569,7 +606,7 @@ sr_shmext_change_sub_del(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, sr_lock_mode_t 
 {
     sr_error_info_t *err_info = NULL;
     sr_mod_change_sub_t *shm_sub;
-    uint16_t i;
+    uint32_t i;
 
     assert((has_lock == SR_LOCK_NONE) || (has_lock == SR_LOCK_WRITE));
 
@@ -706,7 +743,7 @@ sr_shmext_oper_sub_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_t sub_id, 
     off_t xpath_off;
     sr_mod_oper_sub_t *shm_sub;
     size_t new_len, cur_len;
-    uint16_t i;
+    uint32_t i;
 
     assert(xpath && sub_type);
 
@@ -835,7 +872,7 @@ sr_shmext_oper_sub_del(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_t sub_id)
 {
     sr_error_info_t *err_info = NULL;
     sr_mod_oper_sub_t *shm_sub;
-    uint16_t i;
+    uint32_t i;
 
     /* OPER SUB WRITE LOCK */
     if ((err_info = sr_rwlock(&shm_mod->oper_lock, SR_SHMEXT_SUB_LOCK_TIMEOUT, SR_LOCK_WRITE, conn->cid, __func__, NULL,
@@ -959,7 +996,8 @@ sr_shmext_oper_sub_stop(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_t del_idx
 }
 
 sr_error_info_t *
-sr_shmext_notif_sub_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_t sub_id, uint32_t evpipe_num, int suspended)
+sr_shmext_notif_sub_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_t sub_id, uint32_t evpipe_num,
+        struct timespec *listen_since)
 {
     sr_error_info_t *err_info = NULL;
     sr_mod_notif_sub_t *shm_sub;
@@ -969,6 +1007,9 @@ sr_shmext_notif_sub_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_t sub_id,
             NULL, NULL))) {
         return err_info;
     }
+
+    /* if a notification is sent now, once it gets the lock, this subscription will already be listening */
+    sr_time_get(listen_since, 0);
 
     /* EXT WRITE LOCK */
     if ((err_info = sr_shmext_conn_remap_lock(conn, SR_LOCK_WRITE, 1, __func__))) {
@@ -987,7 +1028,7 @@ sr_shmext_notif_sub_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_t sub_id,
     /* fill new subscription */
     shm_sub->sub_id = sub_id;
     shm_sub->evpipe_num = evpipe_num;
-    ATOMIC_STORE_RELAXED(shm_sub->suspended, suspended);
+    ATOMIC_STORE_RELAXED(shm_sub->suspended, 0);
     shm_sub->cid = conn->cid;
 
     SR_LOG_DBG("#SHM after (adding notif sub)");
@@ -1055,7 +1096,7 @@ sr_shmext_notif_sub_del(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_t sub_id)
 {
     sr_error_info_t *err_info = NULL;
     sr_mod_notif_sub_t *shm_sub;
-    uint16_t i;
+    uint32_t i;
 
     /* NOTIF SUB WRITE LOCK */
     if ((err_info = sr_rwlock(&shm_mod->notif_lock, SR_SHMEXT_SUB_LOCK_TIMEOUT, SR_LOCK_WRITE, conn->cid, __func__, NULL,
@@ -1136,7 +1177,7 @@ sr_shmext_notif_sub_stop(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_t del_id
     evpipe_num = shm_sub[del_idx].evpipe_num;
 
     /* remove the subscription */
-    if ((err_info = sr_shmext_notif_sub_free(conn, shm_mod, del_idx))) {
+    if ((tmp_err = sr_shmext_notif_sub_free(conn, shm_mod, del_idx))) {
         sr_errinfo_merge(&err_info, tmp_err);
     }
 
@@ -1145,7 +1186,7 @@ sr_shmext_notif_sub_stop(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_t del_id
         sr_shmext_conn_remap_unlock(conn, SR_LOCK_READ, 1, __func__);
 
         /* NOTIF SUB READ LOCK DOWNGRADE */
-        if ((err_info = sr_rwrelock(&shm_mod->notif_lock, SR_SHMEXT_SUB_LOCK_TIMEOUT, SR_LOCK_READ, conn->cid, __func__,
+        if ((tmp_err = sr_rwrelock(&shm_mod->notif_lock, SR_SHMEXT_SUB_LOCK_TIMEOUT, SR_LOCK_READ, conn->cid, __func__,
                 NULL, NULL))) {
             sr_errinfo_merge(&err_info, tmp_err);
         }
@@ -1310,7 +1351,7 @@ sr_shmext_rpc_sub_del(sr_conn_ctx_t *conn, sr_rpc_t *shm_rpc, uint32_t sub_id)
 {
     sr_error_info_t *err_info = NULL;
     sr_mod_rpc_sub_t *shm_sub;
-    uint16_t i;
+    uint32_t i;
 
     /* RPC SUB WRITE LOCK */
     if ((err_info = sr_rwlock(&shm_rpc->lock, SR_SHMEXT_SUB_LOCK_TIMEOUT, SR_LOCK_WRITE, conn->cid, __func__, NULL, NULL))) {
@@ -1439,15 +1480,14 @@ sr_shmext_recover_sub_all(sr_conn_ctx_t *conn)
     sr_datastore_t ds;
     sr_mod_t *shm_mod;
     sr_rpc_t *shm_rpc;
-    uint32_t i, j;
+    uint32_t i, j, count;
 
     /* go through all the modules, RPCs and recover their subscriptions */
     for (i = 0; i < SR_CONN_MAIN_SHM(conn)->mod_count; ++i) {
         shm_mod = SR_SHM_MOD_IDX(conn->main_shm.addr, i);
         for (ds = 0; ds < SR_DS_COUNT; ++ds) {
-            while (shm_mod->change_sub[ds].sub_count) {
-                if ((err_info = sr_shmext_change_sub_stop(conn, shm_mod, ds, shm_mod->change_sub[ds].sub_count - 1, 1,
-                        SR_LOCK_NONE, 1))) {
+            for (count = shm_mod->change_sub[ds].sub_count; count; --count) {
+                if ((err_info = sr_shmext_change_sub_stop(conn, shm_mod, ds, count - 1, 1, SR_LOCK_NONE, 1))) {
                     sr_errinfo_free(&err_info);
                 }
             }
@@ -1455,21 +1495,21 @@ sr_shmext_recover_sub_all(sr_conn_ctx_t *conn)
 
         shm_rpc = (sr_rpc_t *)(conn->main_shm.addr + shm_mod->rpcs);
         for (j = 0; j < shm_mod->rpc_count; ++j) {
-            while (shm_rpc[j].sub_count) {
-                if ((err_info = sr_shmext_rpc_sub_stop(conn, &shm_rpc[j], shm_rpc[j].sub_count - 1, 1, SR_LOCK_NONE, 1))) {
+            for (count = shm_rpc[j].sub_count; count; --count) {
+                if ((err_info = sr_shmext_rpc_sub_stop(conn, &shm_rpc[j], count - 1, 1, SR_LOCK_NONE, 1))) {
                     sr_errinfo_free(&err_info);
                 }
             }
         }
 
-        while (shm_mod->oper_sub_count) {
-            if ((err_info = sr_shmext_oper_sub_stop(conn, shm_mod, shm_mod->oper_sub_count - 1, 1, SR_LOCK_NONE, 1))) {
+        for (count = shm_mod->oper_sub_count; count; --count) {
+            if ((err_info = sr_shmext_oper_sub_stop(conn, shm_mod, count - 1, 1, SR_LOCK_NONE, 1))) {
                 sr_errinfo_free(&err_info);
             }
         }
 
-        while (shm_mod->notif_sub_count) {
-            if ((err_info = sr_shmext_notif_sub_stop(conn, shm_mod, shm_mod->notif_sub_count - 1, 1, SR_LOCK_NONE, 1))) {
+        for (count = shm_mod->notif_sub_count; count; --count) {
+            if ((err_info = sr_shmext_notif_sub_stop(conn, shm_mod, count - 1, 1, SR_LOCK_NONE, 1))) {
                 sr_errinfo_free(&err_info);
             }
         }

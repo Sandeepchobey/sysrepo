@@ -744,13 +744,14 @@ sr_replay_skip_notif(int notif_fd)
 }
 
 sr_error_info_t *
-sr_replay_notify(sr_conn_ctx_t *conn, const char *mod_name, uint32_t sub_id, const char *xpath, time_t start_time,
-        time_t stop_time, sr_event_notif_cb cb, sr_event_notif_tree_cb tree_cb, void *private_data)
+sr_replay_notify(sr_conn_ctx_t *conn, const char *mod_name, uint32_t sub_id, const char *xpath,
+        const struct timespec *start_time, const struct timespec *stop_time, struct timespec *listen_since,
+        sr_event_notif_cb cb, sr_event_notif_tree_cb tree_cb, void *private_data)
 {
     sr_error_info_t *err_info = NULL;
     sr_mod_t *shm_mod;
     time_t file_from_ts, file_to_ts;
-    struct timespec notif_ts;
+    struct timespec notif_ts, stop_ts;
     struct ly_set *set = NULL;
     struct lyd_node *notif = NULL, *notif_op;
     sr_session_ctx_t *ev_sess = NULL;
@@ -761,9 +762,15 @@ sr_replay_notify(sr_conn_ctx_t *conn, const char *mod_name, uint32_t sub_id, con
     SR_CHECK_INT_GOTO(!shm_mod, err_info, cleanup);
 
     if (!ATOMIC_LOAD_RELAXED(shm_mod->replay_supp)) {
-        /* nothing to do */
         SR_LOG_WRN("Module \"%s\" does not support notification replay.", mod_name);
-        goto cleanup;
+        goto replay_complete;
+    }
+
+    /* get the stop timestamp - only notifications with smaller timestamp can be replayed */
+    if (stop_time->tv_sec && (sr_time_cmp(stop_time, listen_since) < 1)) {
+        stop_ts = *stop_time;
+    } else {
+        stop_ts = *listen_since;
     }
 
     /* create event session */
@@ -772,12 +779,12 @@ sr_replay_notify(sr_conn_ctx_t *conn, const char *mod_name, uint32_t sub_id, con
     }
 
     /* find first file */
-    if ((err_info = sr_replay_find_file(mod_name, start_time, 0, &file_from_ts, &file_to_ts))) {
+    if ((err_info = sr_replay_find_file(mod_name, start_time->tv_sec, 0, &file_from_ts, &file_to_ts))) {
         goto cleanup;
     }
 
     /* is this a valid notification file? */
-    while (file_from_ts && file_to_ts && (!stop_time || (file_from_ts <= stop_time))) {
+    while (file_from_ts && file_to_ts && (file_from_ts <= stop_ts.tv_sec)) {
         /* open the file */
         if ((err_info = sr_replay_open_file(mod_name, file_from_ts, file_to_ts, O_RDONLY, &fd))) {
             goto cleanup;
@@ -792,13 +799,13 @@ sr_replay_notify(sr_conn_ctx_t *conn, const char *mod_name, uint32_t sub_id, con
                 sr_errinfo_new(&err_info, SR_ERR_INTERNAL, "Unexpected notification file EOF.");
                 goto cleanup;
             }
-            if ((notif_ts.tv_sec < start_time) && (err_info = sr_replay_skip_notif(fd))) {
+            if ((sr_time_cmp(&notif_ts, start_time) < 0) && (err_info = sr_replay_skip_notif(fd))) {
                 goto cleanup;
             }
-        } while (notif_ts.tv_sec < start_time);
+        } while (sr_time_cmp(&notif_ts, start_time) < 0);
 
-        /* replay notifications until stop_time is reached */
-        while (notif_ts.tv_sec && (!stop_time || (notif_ts.tv_sec <= stop_time))) {
+        /* replay notifications until stop_ts is reached */
+        while (notif_ts.tv_sec && (sr_time_cmp(&notif_ts, &stop_ts) < 0)) {
 
             /* parse notification */
             lyd_free_all(notif);
@@ -834,7 +841,7 @@ sr_replay_notify(sr_conn_ctx_t *conn, const char *mod_name, uint32_t sub_id, con
         }
 
         /* no more notifications should be replayed */
-        if (stop_time && (notif_ts.tv_sec > stop_time)) {
+        if (sr_time_cmp(&notif_ts, &stop_ts) > -1) {
             break;
         }
 
@@ -844,10 +851,11 @@ sr_replay_notify(sr_conn_ctx_t *conn, const char *mod_name, uint32_t sub_id, con
         }
     }
 
-    /* replay last notification if the subscription continues */
+replay_complete:
+    /* replay is completed */
     sr_time_get(&notif_ts, 0);
-    if ((!stop_time || (stop_time >= notif_ts.tv_sec)) && (err_info = sr_notif_call_callback(ev_sess, cb, tree_cb,
-            private_data, SR_EV_NOTIF_REPLAY_COMPLETE, sub_id, NULL, &notif_ts))) {
+    if ((err_info = sr_notif_call_callback(ev_sess, cb, tree_cb, private_data, SR_EV_NOTIF_REPLAY_COMPLETE, sub_id,
+            NULL, &notif_ts))) {
         goto cleanup;
     }
 

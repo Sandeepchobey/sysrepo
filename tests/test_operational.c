@@ -57,50 +57,50 @@ setup(void **state)
         return 1;
     }
 
-    if (sr_install_module(st->conn, TESTS_DIR "/files/test.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/test.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/ietf-interfaces.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ietf-interfaces.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/iana-if-type.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/iana-if-type.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/ietf-if-aug.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ietf-if-aug.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/ietf-interface-protection.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ietf-interface-protection.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/ietf-microwave-radio-link.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ietf-microwave-radio-link.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/mixed-config.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/mixed-config.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/act.yang", TESTS_DIR "/files", act_feats) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/act.yang", TESTS_SRC_DIR "/files", act_feats) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/act2.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/act2.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/act3.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/act3.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/defaults.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/defaults.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/ops-ref.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ops-ref.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/ops.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ops.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/czechlight-roadm-device@2019-09-30.yang", TESTS_DIR "/files",
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/czechlight-roadm-device@2019-09-30.yang", TESTS_SRC_DIR "/files",
             rd_feats) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/oper-group-test.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/oper-group-test.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
     sr_disconnect(st->conn);
@@ -601,10 +601,12 @@ test_sr_mon(void **state)
                     "<xpath xmlns:if=\"urn:ietf:params:xml:ns:yang:ietf-interfaces\">/if:interfaces</xpath>"
                     "<priority>3</priority>"
                     "<cid></cid>"
+                    "<suspended>false</suspended>"
                 "</change-sub>"
                 "<operational-sub>"
                     "<xpath xmlns:if=\"urn:ietf:params:xml:ns:yang:ietf-interfaces\">/if:interfaces-state</xpath>"
                     "<cid></cid>"
+                    "<suspended>false</suspended>"
                 "</operational-sub>"
             "</subscriptions>"
         "</module>"
@@ -634,6 +636,7 @@ test_sr_mon(void **state)
                     "<datastore xmlns:ds=\"urn:ietf:params:xml:ns:yang:ietf-datastores\">ds:running</datastore>"
                     "<priority>0</priority>"
                     "<cid></cid>"
+                    "<suspended>false</suspended>"
                 "</change-sub>"
             "</subscriptions>"
         "</module>"
@@ -651,6 +654,7 @@ test_sr_mon(void **state)
                 "<operational-sub>"
                     "<xpath xmlns:a=\"urn:act\" xmlns:a2=\"urn:act2\">/a:basics/a:subbasics/a2:complex_number/a2:imaginary_part</xpath>"
                     "<cid></cid>"
+                    "<suspended>false</suspended>"
                 "</operational-sub>"
             "</subscriptions>"
         "</module>"
@@ -673,8 +677,14 @@ test_sr_mon(void **state)
                 "<timestamp></timestamp>"
             "</ds-lock>"
             "<subscriptions>"
-                "<notification-sub></notification-sub>"
-                "<notification-sub></notification-sub>"
+                "<notification-sub>"
+                    "<cid></cid>"
+                    "<suspended>false</suspended>"
+                "</notification-sub>"
+                "<notification-sub>"
+                    "<cid></cid>"
+                    "<suspended>false</suspended>"
+                "</notification-sub>"
             "</subscriptions>"
         "</module>"
         "<module>"
@@ -702,11 +712,13 @@ test_sr_mon(void **state)
                 "<xpath xmlns:a=\"urn:act\">/a:basics/a:animals/a:convert[a:direction='false']</xpath>"
                 "<priority>5</priority>"
                 "<cid></cid>"
+                "<suspended>false</suspended>"
             "</rpc-sub>"
             "<rpc-sub>"
                 "<xpath xmlns:a=\"urn:act\">/a:basics/a:animals/a:convert</xpath>"
                 "<priority>4</priority>"
                 "<cid></cid>"
+                "<suspended>false</suspended>"
             "</rpc-sub>"
         "</rpc>"
         "<rpc>"
@@ -715,6 +727,7 @@ test_sr_mon(void **state)
                 "<xpath xmlns:a=\"urn:act\">/a:capitalize</xpath>"
                 "<priority>0</priority>"
                 "<cid></cid>"
+                "<suspended>false</suspended>"
             "</rpc-sub>"
         "</rpc>"
         "<connection>"
@@ -726,7 +739,6 @@ test_sr_mon(void **state)
     sr_str_del(str1, "<pid>","</pid>");
     sr_str_del(str1, "<timestamp>","</timestamp>");
     sr_str_del(str1, "<sid>","</sid>");
-    sr_str_del(str1, "<notification-sub>","</notification-sub>");
     assert_string_equal(str1, str2);
     free(str1);
 
@@ -2906,9 +2918,6 @@ test_stored_config(void **state)
     ret = sr_set_item_str(st->sess, "/ietf-interfaces:interfaces/interface[name='eth1']/description",
             "config-description", NULL, SR_EDIT_STRICT);
     assert_int_equal(ret, SR_ERR_OK);
-    ret = sr_set_item_str(st->sess, "/ietf-interfaces:interfaces/interface[name='eth1']/enabled",
-            "false", NULL, SR_EDIT_STRICT);
-    assert_int_equal(ret, SR_ERR_OK);
     ret = sr_apply_changes(st->sess, 0);
     assert_int_equal(ret, SR_ERR_OK);
 
@@ -2921,9 +2930,77 @@ test_stored_config(void **state)
     ret = sr_session_switch_ds(st->sess, SR_DS_OPERATIONAL);
     assert_int_equal(ret, SR_ERR_OK);
 
-    /* overwrite running data by some operational config data */
+    /*
+     * 1) store oper data changing only the default flag
+     */
+    ret = sr_set_item_str(st->sess, "/ietf-interfaces:interfaces/interface[name='eth1']/enabled",
+            "true", NULL, 0);
+    assert_int_equal(ret, SR_ERR_OK);
+    ret = sr_apply_changes(st->sess, 0);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    /* read the operational data */
+    ret = sr_get_data(st->sess, "/ietf-interfaces:interfaces", 0, 0, SR_OPER_WITH_ORIGIN, &data);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    ret = lyd_print_mem(&str1, data, LYD_XML, LYD_PRINT_WITHSIBLINGS | LYD_PRINT_SHRINK);
+    assert_int_equal(ret, 0);
+
+    lyd_free_all(data);
+
+    str2 =
+    "<interfaces xmlns=\"urn:ietf:params:xml:ns:yang:ietf-interfaces\""
+        " xmlns:or=\"urn:ietf:params:xml:ns:yang:ietf-origin\" or:origin=\"or:intended\">"
+        "<interface>"
+            "<name>eth1</name>"
+            "<description>config-description</description>"
+            "<type xmlns:ianaift=\"urn:ietf:params:xml:ns:yang:iana-if-type\">ianaift:ethernetCsmacd</type>"
+            "<enabled or:origin=\"or:unknown\">true</enabled>"
+        "</interface>"
+    "</interfaces>";
+
+    assert_string_equal(str1, str2);
+    free(str1);
+
+    /*
+     * 2) store oper data changing the value now
+     */
+    ret = sr_set_item_str(st->sess, "/ietf-interfaces:interfaces/interface[name='eth1']/enabled",
+            "false", NULL, 0);
+    assert_int_equal(ret, SR_ERR_OK);
+    ret = sr_apply_changes(st->sess, 0);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    /* read the operational data */
+    ret = sr_get_data(st->sess, "/ietf-interfaces:interfaces", 0, 0, SR_OPER_WITH_ORIGIN, &data);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    ret = lyd_print_mem(&str1, data, LYD_XML, LYD_PRINT_WITHSIBLINGS | LYD_PRINT_SHRINK);
+    assert_int_equal(ret, 0);
+
+    lyd_free_all(data);
+
+    str2 =
+    "<interfaces xmlns=\"urn:ietf:params:xml:ns:yang:ietf-interfaces\""
+        " xmlns:or=\"urn:ietf:params:xml:ns:yang:ietf-origin\" or:origin=\"or:intended\">"
+        "<interface>"
+            "<name>eth1</name>"
+            "<description>config-description</description>"
+            "<type xmlns:ianaift=\"urn:ietf:params:xml:ns:yang:iana-if-type\">ianaift:ethernetCsmacd</type>"
+            "<enabled or:origin=\"or:unknown\">false</enabled>"
+        "</interface>"
+    "</interfaces>";
+
+    assert_string_equal(str1, str2);
+    free(str1);
+
+    /*
+     * 3) overwrite running data by some operational config data
+     */
     ret = sr_set_item_str(st->sess, "/ietf-interfaces:interfaces/interface[name='eth1']/description",
             "oper-description", NULL, 0);
+    assert_int_equal(ret, SR_ERR_OK);
+    ret = sr_oper_delete_item_str(st->sess, "/ietf-interfaces:interfaces/interface[name='eth1']/enabled", "false", 0);
     assert_int_equal(ret, SR_ERR_OK);
     ret = sr_apply_changes(st->sess, 0);
     assert_int_equal(ret, SR_ERR_OK);
@@ -2944,14 +3021,16 @@ test_stored_config(void **state)
             "<name>eth1</name>"
             "<description or:origin=\"or:unknown\">oper-description</description>"
             "<type xmlns:ianaift=\"urn:ietf:params:xml:ns:yang:iana-if-type\">ianaift:ethernetCsmacd</type>"
-            "<enabled>false</enabled>"
+            "<enabled or:origin=\"or:default\">true</enabled>"
         "</interface>"
     "</interfaces>";
 
     assert_string_equal(str1, str2);
     free(str1);
 
-    /* delete the interface */
+    /*
+     * 4) delete the interface
+     */
     ret = sr_session_switch_ds(st->sess, SR_DS_RUNNING);
     assert_int_equal(ret, SR_ERR_OK);
     ret = sr_delete_item(st->sess, "/ietf-interfaces:interfaces/interface[name='eth1']", SR_EDIT_STRICT);
@@ -3171,6 +3250,34 @@ test_stored_top_list(void **state)
     ret = sr_session_switch_ds(st->sess, SR_DS_RUNNING);
     assert_int_equal(ret, SR_ERR_OK);
     sr_unsubscribe(subscr);
+}
+
+/* TEST */
+static void
+test_stored_change_revert(void **state)
+{
+    struct state *st = (struct state *)*state;
+    int ret;
+
+    /* switch to operational DS */
+    ret = sr_session_switch_ds(st->sess, SR_DS_OPERATIONAL);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    /* create a list instance */
+    ret = sr_set_item_str(st->sess, "/mixed-config:test-state/test-case[name='a']/a", "vala", NULL, 0);
+    assert_int_equal(ret, SR_ERR_OK);
+    ret = sr_apply_changes(st->sess, 0);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    /* remove the list instance */
+    ret = sr_oper_delete_item_str(st->sess, "/mixed-config:test-state/test-case[name='a']", NULL, 0);
+    assert_int_equal(ret, SR_ERR_OK);
+    ret = sr_apply_changes(st->sess, 0);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    /* remove all stored data */
+    ret = sr_discard_oper_changes(st->conn, st->sess, NULL, 0);
+    assert_int_equal(ret, SR_ERR_OK);
 }
 
 /* TEST */
@@ -4203,6 +4310,7 @@ main(void)
         cmocka_unit_test_teardown(test_stored_state_list, clear_up),
         cmocka_unit_test_teardown(test_stored_config, clear_up),
         cmocka_unit_test_teardown(test_stored_top_list, clear_up),
+        cmocka_unit_test_teardown(test_stored_change_revert, clear_up),
         cmocka_unit_test_teardown(test_stored_np_cont1, clear_up),
         cmocka_unit_test_teardown(test_stored_np_cont2, clear_up),
         cmocka_unit_test_teardown(test_stored_edit_merge_leaf, clear_up),

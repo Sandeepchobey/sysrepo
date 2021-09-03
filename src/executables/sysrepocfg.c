@@ -121,7 +121,7 @@ error_ly_print(const struct ly_ctx *ctx)
     struct ly_err_item *e;
 
     for (e = ly_err_first(ctx); e; e = e->next) {
-        error_print(0, "libyang: %s", e->msg);
+        fprintf(stderr, "libyang error: %s\n", e->msg);
     }
 
     ly_err_clean((struct ly_ctx *)ctx, NULL);
@@ -244,7 +244,11 @@ step_load_data(sr_session_ctx_t *sess, const char *file_path, LYD_FORMAT format,
 
     /* get input */
     if (file_path) {
-        ly_in_new_filepath(file_path, 0, &in);
+        if (ly_in_new_filepath(file_path, 0, &in)) {
+            /* empty file */
+            ptr = strdup("");
+            ly_in_new_memory(ptr, &in);
+        }
     } else {
         /* we need to load the data into memory first */
         if (step_read_file(stdin, &ptr)) {
@@ -260,7 +264,7 @@ step_load_data(sr_session_ctx_t *sess, const char *file_path, LYD_FORMAT format,
         lyrc = lyd_parse_data(ly_ctx, NULL, in, format, parse_flags, 0, data);
         break;
     case DATA_EDIT:
-        parse_flags = LYD_PARSE_NO_STATE | LYD_PARSE_ONLY | (opaq ? LYD_PARSE_OPAQ : 0);
+        parse_flags = LYD_PARSE_NO_STATE | LYD_PARSE_ONLY | (opaq ? LYD_PARSE_OPAQ : (not_strict ? 0 : LYD_PARSE_STRICT));
         lyrc = lyd_parse_data(ly_ctx, NULL, in, format, parse_flags, 0, data);
         break;
     case DATA_RPC:
@@ -363,9 +367,12 @@ op_export(sr_session_ctx_t *sess, const char *file_path, const char *module_name
 
     /* get subtrees */
     if (module_name) {
-        asprintf(&str, "/%s:*", module_name);
-        r = sr_get_data(sess, str, max_depth, timeout_s * 1000, 0, &data);
-        free(str);
+        if (asprintf(&str, "/%s:*", module_name) == -1) {
+            r = SR_ERR_NO_MEMORY;
+        } else {
+            r = sr_get_data(sess, str, max_depth, timeout_s * 1000, 0, &data);
+            free(str);
+        }
     } else if (xpath) {
         r = sr_get_data(sess, xpath, max_depth, timeout_s * 1000, 0, &data);
     } else {
@@ -400,7 +407,12 @@ op_edit(sr_session_ctx_t *sess, const char *file_path, const char *editor, const
 
     if (file_path) {
         /* just apply an edit from a file */
-        if (step_load_data(sess, file_path, format, DATA_EDIT, 0, opaq, &data)) {
+        if (step_load_data(sess, file_path, format, DATA_EDIT, not_strict, opaq, &data)) {
+            return EXIT_FAILURE;
+        }
+
+        if (!data) {
+            error_print(0, "No parsed data");
             return EXIT_FAILURE;
         }
 

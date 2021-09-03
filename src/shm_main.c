@@ -462,12 +462,21 @@ sr_shmmain_ly_ctx_init(struct ly_ctx **ly_ctx)
     /* load just the internal module */
     if (lys_parse_mem(*ly_ctx, sysrepo_yang, LYS_IN_YANG, NULL)) {
         sr_errinfo_new_ly(&err_info, *ly_ctx);
-        ly_ctx_destroy(*ly_ctx);
-        *ly_ctx = NULL;
-        return err_info;
+        goto cleanup;
     }
 
-    return NULL;
+    /* compile */
+    if (ly_ctx_compile(*ly_ctx)) {
+        sr_errinfo_new_ly(&err_info, *ly_ctx);
+        goto cleanup;
+    }
+
+cleanup:
+    if (err_info) {
+        ly_ctx_destroy(*ly_ctx);
+        *ly_ctx = NULL;
+    }
+    return err_info;
 }
 
 sr_error_info_t *
@@ -608,7 +617,10 @@ sr_shmmain_fill_module(const struct lyd_node *sr_mod, size_t shm_mod_idx, sr_shm
     /* init SHM module structure */
     memset(shm_mod, 0, sizeof *shm_mod);
     for (ds = 0; ds < SR_DS_COUNT; ++ds) {
-        if ((err_info = sr_rwlock_init(&shm_mod->data_lock_info[ds].lock, 1))) {
+        if ((err_info = sr_rwlock_init(&shm_mod->data_lock_info[ds].data_lock, 1))) {
+            return err_info;
+        }
+        if ((err_info = sr_mutex_init(&shm_mod->data_lock_info[ds].ds_lock, 1))) {
             return err_info;
         }
     }

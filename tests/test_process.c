@@ -14,8 +14,6 @@
  *     https://opensource.org/licenses/BSD-3-Clause
  */
 
-#define _POSIX_C_SOURCE 199309L
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -178,10 +176,10 @@ setup(void)
 
     sr_assert(sr_connect(0, &conn) == SR_ERR_OK);
 
-    sr_assert(sr_install_module(conn, TESTS_DIR "/files/ops-ref.yang", TESTS_DIR "/files", en_feats) == SR_ERR_OK);
-    sr_assert(sr_install_module(conn, TESTS_DIR "/files/ops.yang", TESTS_DIR "/files", NULL) == SR_ERR_OK);
-    sr_assert(sr_install_module(conn, TESTS_DIR "/files/ietf-interfaces.yang", TESTS_DIR "/files", NULL) == SR_ERR_OK);
-    sr_assert(sr_install_module(conn, TESTS_DIR "/files/iana-if-type.yang", TESTS_DIR "/files", NULL) == SR_ERR_OK);
+    sr_assert(sr_install_module(conn, TESTS_SRC_DIR "/files/ops-ref.yang", TESTS_SRC_DIR "/files", en_feats) == SR_ERR_OK);
+    sr_assert(sr_install_module(conn, TESTS_SRC_DIR "/files/ops.yang", TESTS_SRC_DIR "/files", NULL) == SR_ERR_OK);
+    sr_assert(sr_install_module(conn, TESTS_SRC_DIR "/files/ietf-interfaces.yang", TESTS_SRC_DIR "/files", NULL) == SR_ERR_OK);
+    sr_assert(sr_install_module(conn, TESTS_SRC_DIR "/files/iana-if-type.yang", TESTS_SRC_DIR "/files", NULL) == SR_ERR_OK);
 
     sr_disconnect(conn);
 }

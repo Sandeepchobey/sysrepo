@@ -74,19 +74,19 @@ setup(void **state)
         return 1;
     }
 
-    if (sr_install_module(st->conn, TESTS_DIR "/files/test.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/test.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/ietf-interfaces.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ietf-interfaces.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/iana-if-type.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/iana-if-type.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/ops-ref.yang", TESTS_DIR "/files", ops_ref_feats) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ops-ref.yang", TESTS_SRC_DIR "/files", ops_ref_feats) != SR_ERR_OK) {
         return 1;
     }
-    if (sr_install_module(st->conn, TESTS_DIR "/files/ops.yang", TESTS_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ops.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
     sr_disconnect(st->conn);
@@ -317,10 +317,10 @@ test_input_parameters(void **state)
     /* data tree must be created with the session connection libyang context */
     struct ly_ctx *ctx;
 
-    assert_int_equal(LY_SUCCESS, ly_ctx_new(TESTS_DIR "/files/", 0, &ctx));
-    const struct lys_module *mod;
+    assert_int_equal(LY_SUCCESS, ly_ctx_new(TESTS_SRC_DIR "/files/", 0, &ctx));
+    struct lys_module *mod;
 
-    assert_int_equal(LY_SUCCESS, lys_parse_path(ctx, TESTS_DIR "/files/simple.yang", LYS_IN_YANG, &mod));
+    assert_int_equal(LY_SUCCESS, lys_parse_path(ctx, TESTS_SRC_DIR "/files/simple.yang", LYS_IN_YANG, &mod));
     assert_int_equal(LY_SUCCESS, lyd_new_path2(NULL, ctx, "/simple:ac1", NULL, 0, 0, 0, NULL, &input));
     ret = sr_event_notif_send_tree(st->sess, input, 0, 0);
     assert_int_equal(ret, SR_ERR_INVAL_ARG);
@@ -502,6 +502,10 @@ notif_stop_cb(sr_session_ctx_t *session, uint32_t sub_id, const sr_ev_notif_type
 
     switch (ATOMIC_LOAD_RELAXED(st->cb_called)) {
     case 0:
+        assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY_COMPLETE);
+        assert_null(notif);
+        break;
+    case 1:
         assert_int_equal(notif_type, SR_EV_NOTIF_TERMINATED);
         assert_null(notif);
         break;
@@ -511,7 +515,9 @@ notif_stop_cb(sr_session_ctx_t *session, uint32_t sub_id, const sr_ev_notif_type
 
     /* signal that we were called */
     ATOMIC_INC_RELAXED(st->cb_called);
-    pthread_barrier_wait(&st->barrier);
+    if (notif_type == SR_EV_NOTIF_TERMINATED) {
+        pthread_barrier_wait(&st->barrier);
+    }
 }
 
 static void
@@ -529,7 +535,7 @@ test_stop(void **state)
 
     /* wait for the stop notification */
     pthread_barrier_wait(&st->barrier);
-    assert_int_equal(ATOMIC_LOAD_RELAXED(st->cb_called), 1);
+    assert_int_equal(ATOMIC_LOAD_RELAXED(st->cb_called), 2);
 
     sr_unsubscribe(subscr);
 }
@@ -556,6 +562,15 @@ notif_replay_simple_cb(sr_session_ctx_t *session, uint32_t sub_id, const sr_ev_n
         assert_null(notif);
         break;
     case 2:
+        assert_int_equal(notif_type, SR_EV_NOTIF_REALTIME);
+        assert_non_null(notif);
+        assert_string_equal(notif->schema->name, "notif4");
+        break;
+    case 3:
+        assert_int_equal(notif_type, SR_EV_NOTIF_MODIFIED);
+        assert_null(notif);
+        break;
+    case 4:
         assert_int_equal(notif_type, SR_EV_NOTIF_TERMINATED);
         assert_null(notif);
         break;
@@ -565,7 +580,9 @@ notif_replay_simple_cb(sr_session_ctx_t *session, uint32_t sub_id, const sr_ev_n
 
     /* signal that we were called */
     ATOMIC_INC_RELAXED(st->cb_called);
-    pthread_barrier_wait(&st->barrier);
+    if (notif_type != SR_EV_NOTIF_MODIFIED) {
+        pthread_barrier_wait(&st->barrier);
+    }
 }
 
 static void
@@ -574,8 +591,9 @@ test_replay_simple(void **state)
     struct state *st = (struct state *)*state;
     sr_subscription_ctx_t *subscr;
     struct lyd_node *notif;
-    time_t cur_ts;
+    struct timespec start, stop;
     int ret;
+    uint32_t sub_id;
 
     ATOMIC_STORE_RELAXED(st->cb_called, 0);
 
@@ -595,7 +613,7 @@ test_replay_simple(void **state)
     assert_int_equal(LY_SUCCESS, lyd_new_path(NULL, sr_get_context(st->conn), "/ops:notif3/list2[k='k']", NULL, 0, &notif));
 
     /* remember current time */
-    cur_ts = time(NULL);
+    clock_gettime(CLOCK_REALTIME, &start);
 
     /* send the notification, it should be stored for replay */
     ret = sr_event_notif_send_tree(st->sess, notif, 0, 0);
@@ -603,15 +621,32 @@ test_replay_simple(void **state)
     assert_int_equal(ret, SR_ERR_OK);
 
     /* now subscribe and expect the notification replayed */
-    ret = sr_event_notif_subscribe_tree(st->sess, "ops", NULL, cur_ts, time(NULL) + 1, notif_replay_simple_cb, st,
+    ret = sr_notif_subscribe_tree(st->sess, "ops", NULL, &start, NULL, notif_replay_simple_cb, st,
             SR_SUBSCR_CTX_REUSE, &subscr);
     assert_int_equal(ret, SR_ERR_OK);
+    sub_id = sr_subscription_get_last_sub_id(subscr);
 
-    /* wait for the replay, complete, and stop notifications */
+    /* create another notification */
+    assert_int_equal(LY_SUCCESS, lyd_new_path(NULL, sr_get_context(st->conn), "/ops:notif4/l", "val", 0, &notif));
+
+    /* send the notification, delivered realtime */
+    ret = sr_event_notif_send_tree(st->sess, notif, 0, 0);
+    lyd_free_all(notif);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    /* wait for the replay notif, complete, realtime notif */
     pthread_barrier_wait(&st->barrier);
     pthread_barrier_wait(&st->barrier);
     pthread_barrier_wait(&st->barrier);
-    assert_int_equal(ATOMIC_LOAD_RELAXED(st->cb_called), 3);
+
+    /* make the subscription reach its stop time */
+    clock_gettime(CLOCK_REALTIME, &stop);
+    ret = sr_notif_sub_modify_stop_time(subscr, sub_id, &stop);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    /* wait for stop */
+    pthread_barrier_wait(&st->barrier);
+    assert_int_equal(ATOMIC_LOAD_RELAXED(st->cb_called), 5);
 
     sr_unsubscribe(subscr);
 }
@@ -669,59 +704,71 @@ notif_replay_interval_cb(sr_session_ctx_t *session, uint32_t sub_id, const sr_ev
         assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "10");
         break;
     case 8:
-        assert_int_equal(notif_type, SR_EV_NOTIF_TERMINATED);
+        assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY_COMPLETE);
         assert_null(notif);
         break;
     case 9:
-        assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY);
-        assert_non_null(notif);
-        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "1");
+        assert_int_equal(notif_type, SR_EV_NOTIF_TERMINATED);
+        assert_null(notif);
         break;
     case 10:
         assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY);
         assert_non_null(notif);
-        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "2");
+        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "1");
         break;
     case 11:
         assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY);
         assert_non_null(notif);
-        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "3");
+        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "2");
         break;
     case 12:
-        assert_int_equal(notif_type, SR_EV_NOTIF_TERMINATED);
-        assert_null(notif);
+        assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY);
+        assert_non_null(notif);
+        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "3");
         break;
     case 13:
-        assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY);
-        assert_non_null(notif);
-        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "6");
+        assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY_COMPLETE);
+        assert_null(notif);
         break;
     case 14:
-        assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY);
-        assert_non_null(notif);
-        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "7");
+        assert_int_equal(notif_type, SR_EV_NOTIF_TERMINATED);
+        assert_null(notif);
         break;
     case 15:
         assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY);
         assert_non_null(notif);
-        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "8");
+        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "6");
         break;
     case 16:
         assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY);
         assert_non_null(notif);
-        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "9");
+        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "7");
         break;
     case 17:
         assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY);
         assert_non_null(notif);
-        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "10");
+        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "8");
         break;
     case 18:
         assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY);
         assert_non_null(notif);
-        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "11");
+        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "9");
         break;
     case 19:
+        assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY);
+        assert_non_null(notif);
+        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "10");
+        break;
+    case 20:
+        assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY);
+        assert_non_null(notif);
+        assert_string_equal(lyd_get_value(lyd_child(lyd_child(notif))), "11");
+        break;
+    case 21:
+        assert_int_equal(notif_type, SR_EV_NOTIF_REPLAY_COMPLETE);
+        assert_null(notif);
+        break;
+    case 22:
         assert_int_equal(notif_type, SR_EV_NOTIF_TERMINATED);
         assert_null(notif);
         break;
@@ -739,39 +786,48 @@ test_replay_interval(void **state)
 {
     struct state *st = (struct state *)*state;
     sr_subscription_ctx_t *subscr;
+    struct timespec start = {0}, stop = {0};
     int ret, i = 0;
 
     ATOMIC_STORE_RELAXED(st->cb_called, 0);
 
+    /* stop excludes the notifications and second granularity is not enough */
+    stop.tv_nsec = 999999999;
+
     /* subscribe to the first replay interval */
-    ret = sr_event_notif_subscribe_tree(st->sess, "ops", NULL, start_ts + 2, start_ts + 13, notif_replay_interval_cb, st,
-            0, &subscr);
+    start.tv_sec = start_ts + 2;
+    stop.tv_sec = start_ts + 13;
+    ret = sr_notif_subscribe_tree(st->sess, "ops", NULL, &start, &stop, notif_replay_interval_cb, st, 0, &subscr);
     assert_int_equal(ret, SR_ERR_OK);
 
     /* wait for the replay, complete, and stop notifications */
-    for ( ; i < 9; ++i) {
+    for ( ; i < 10; ++i) {
         pthread_barrier_wait(&st->barrier);
     }
     assert_int_equal(ATOMIC_LOAD_RELAXED(st->cb_called), i);
 
     /* subscribe to the second replay interval */
-    ret = sr_event_notif_subscribe_tree(st->sess, "ops", NULL, start_ts - 20, start_ts + 4, notif_replay_interval_cb, st,
+    start.tv_sec = start_ts - 20;
+    stop.tv_sec = start_ts + 4;
+    ret = sr_notif_subscribe_tree(st->sess, "ops", NULL, &start, &stop, notif_replay_interval_cb, st,
             SR_SUBSCR_CTX_REUSE, &subscr);
     assert_int_equal(ret, SR_ERR_OK);
 
     /* wait for the replay, complete, and stop notifications */
-    for ( ; i < 13; ++i) {
+    for ( ; i < 15; ++i) {
         pthread_barrier_wait(&st->barrier);
     }
     assert_int_equal(ATOMIC_LOAD_RELAXED(st->cb_called), i);
 
     /* subscribe to the third replay interval */
-    ret = sr_event_notif_subscribe_tree(st->sess, "ops", NULL, start_ts + 9, start_ts + 40, notif_replay_interval_cb, st,
+    start.tv_sec = start_ts + 9;
+    stop.tv_sec = start_ts + 40;
+    ret = sr_notif_subscribe_tree(st->sess, "ops", NULL, &start, &stop, notif_replay_interval_cb, st,
             SR_SUBSCR_CTX_REUSE, &subscr);
     assert_int_equal(ret, SR_ERR_OK);
 
     /* wait for the replay, complete, and stop notifications */
-    for ( ; i < 20; ++i) {
+    for ( ; i < 23; ++i) {
         pthread_barrier_wait(&st->barrier);
     }
     assert_int_equal(ATOMIC_LOAD_RELAXED(st->cb_called), i);

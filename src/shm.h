@@ -23,7 +23,7 @@
 struct sr_mod_info_s;
 
 #define SR_MAIN_SHM_LOCK "sr_main_lock"     /**< Main SHM file lock name. */
-#define SR_SHM_VER 6                        /**< Main and ext SHM version of their expected content structures. */
+#define SR_SHM_VER 7                        /**< Main and ext SHM version of their expected content structures. */
 
 /**
  * Main SHM organization
@@ -382,11 +382,11 @@ sr_error_info_t *sr_shmext_oper_sub_stop(sr_conn_ctx_t *conn, sr_mod_t *shm_mod,
  * @param[in] shm_mod SHM module.
  * @param[in] sub_id Unique sub ID.
  * @param[in] evpipe_num Subscription event pipe number.
- * @param[in] suspended Whether the notification should be created suspended or not.
+ * @param[out] listen_since Timestamp of the moment the subscription is listening for notifications.
  * @return err_info, NULL on success.
  */
 sr_error_info_t *sr_shmext_notif_sub_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_t sub_id, uint32_t evpipe_num,
-        int suspended);
+        struct timespec *listen_since);
 
 /**
  * @brief Remove main SHM module notification subscription and unlink sub SHM if the last subscription was removed.
@@ -887,7 +887,7 @@ sr_error_info_t *sr_shmsub_notif_listen_process_module_events(struct modsub_noti
  * @param[in] notif_subs Module notification subscriptions.
  * @param[in,out] stop_time_in Nearest stop time of a subscription, if none, left unmodified.
  */
-void sr_shmsub_notif_listen_module_get_stop_time_in(struct modsub_notif_s *notif_subs, time_t *stop_time_in);
+void sr_shmsub_notif_listen_module_get_stop_time_in(struct modsub_notif_s *notif_subs, struct timespec *stop_time_in);
 
 /**
  * @brief Check notification subscriptions stop time and finish the subscription if it has elapsed.

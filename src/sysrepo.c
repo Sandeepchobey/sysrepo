@@ -271,8 +271,9 @@ cleanup:
 API int
 sr_disconnect(sr_conn_ctx_t *conn)
 {
-    sr_error_info_t *err_info = NULL, *tmp_err;
+    sr_error_info_t *err_info = NULL;
     uint32_t i;
+    int rc;
 
     if (!conn) {
         return sr_api_ret(NULL, NULL);
@@ -280,35 +281,41 @@ sr_disconnect(sr_conn_ctx_t *conn)
 
     /* stop all session notification buffer threads, they use read lock so they need conn state in SHM */
     for (i = 0; i < conn->session_count; ++i) {
-        tmp_err = sr_session_notif_buf_stop(conn->sessions[i]);
-        sr_errinfo_merge(&err_info, tmp_err);
+        if ((err_info = sr_session_notif_buf_stop(conn->sessions[i]))) {
+            return sr_api_ret(NULL, err_info);
+        }
     }
 
     /* stop all subscriptions */
     for (i = 0; i < conn->session_count; ++i) {
         while (conn->sessions[i]->subscription_count && conn->sessions[i]->subscriptions[0]) {
-            tmp_err = _sr_unsubscribe(conn->sessions[i]->subscriptions[0]);
-            sr_errinfo_merge(&err_info, tmp_err);
+            if ((err_info = _sr_unsubscribe(conn->sessions[i]->subscriptions[0]))) {
+                return sr_api_ret(NULL, err_info);
+            }
         }
     }
 
     /* stop all the sessions */
     while (conn->session_count) {
-        tmp_err = _sr_session_stop(conn->sessions[0]);
-        sr_errinfo_merge(&err_info, tmp_err);
+        if ((err_info = _sr_session_stop(conn->sessions[0]))) {
+            return sr_api_ret(NULL, err_info);
+        }
     }
 
-    /* free any stored operational data (API function, ignore error) */
-    sr_discard_oper_changes(conn, NULL, NULL, 0);
+    /* free any stored operational data (API function) */
+    if ((rc = sr_discard_oper_changes(conn, NULL, NULL, 0))) {
+        return rc;
+    }
 
     /* stop tracking this connection */
-    tmp_err = sr_shmmain_conn_list_del(conn->cid);
-    sr_errinfo_merge(&err_info, tmp_err);
+    if ((err_info = sr_shmmain_conn_list_del(conn->cid))) {
+        return sr_api_ret(NULL, err_info);
+    }
 
     /* free attributes */
     sr_conn_free(conn);
 
-    return sr_api_ret(NULL, err_info);
+    return sr_api_ret(NULL, NULL);
 }
 
 API int
@@ -351,6 +358,12 @@ sr_get_content_id(sr_conn_ctx_t *conn)
     }
 
     return content_id;
+}
+
+API uid_t
+sr_get_su_uid(void)
+{
+    return SR_SU_UID;
 }
 
 API int
@@ -397,8 +410,8 @@ sr_discard_oper_changes(sr_conn_ctx_t *conn, sr_session_ctx_t *session, const ch
     }
 
     /* add modules, lock, and get data */
-    if ((err_info = sr_modinfo_add_modules(&mod_info, &mod_set, 0, SR_LOCK_WRITE, SR_MI_PERM_WRITE, 0, NULL, NULL, NULL,
-            0, 0))) {
+    if ((err_info = sr_modinfo_add_modules(&mod_info, &mod_set, 0, SR_LOCK_READ,
+            SR_MI_LOCK_UPGRADEABLE | SR_MI_PERM_WRITE, 0, NULL, NULL, NULL, 0, 0))) {
         goto cleanup;
     }
 
@@ -570,16 +583,18 @@ sr_session_notif_buf_stop(sr_session_ctx_t *session)
     /* signal the thread to terminate */
     ATOMIC_STORE_RELAXED(session->notif_buf.thread_running, 0);
 
-    /* wake up the thread */
     sr_time_get(&timeout_ts, SR_NOTIF_BUF_LOCK_TIMEOUT);
 
     /* MUTEX LOCK */
     ret = pthread_mutex_timedlock(&session->notif_buf.lock.mutex, &timeout_ts);
     if (ret) {
         SR_ERRINFO_LOCK(&err_info, __func__, ret);
+        /* restore */
+        ATOMIC_STORE_RELAXED(session->notif_buf.thread_running, 1);
         return err_info;
     }
 
+    /* wake up the thread */
     pthread_cond_broadcast(&session->notif_buf.lock.cond);
 
     /* MUTEX UNLOCK */
@@ -613,15 +628,17 @@ _sr_session_stop(sr_session_ctx_t *session)
     /* subscriptions need to be freed before, with a WRITE lock */
     assert(!session->subscription_count && !session->subscriptions);
 
+    /* stop notification buffering thread */
+    if ((err_info = sr_session_notif_buf_stop(session))) {
+        return err_info;
+    }
+
     /* remove ourselves from conn sessions */
     tmp_err = sr_ptr_del(&session->conn->ptr_lock, (void ***)&session->conn->sessions, &session->conn->session_count, session);
     sr_errinfo_merge(&err_info, tmp_err);
 
     /* release any held locks */
     sr_shmmod_release_locks(session->conn, session->sid);
-
-    /* stop notification buffering thread */
-    sr_session_notif_buf_stop(session);
 
     /* free attributes */
     free(session->user);
@@ -647,37 +664,42 @@ _sr_session_stop(sr_session_ctx_t *session)
 API int
 sr_session_stop(sr_session_ctx_t *session)
 {
-    sr_error_info_t *err_info = NULL, *tmp_err;
+    sr_error_info_t *err_info = NULL;
+    int rc;
 
     if (!session) {
         return sr_api_ret(NULL, NULL);
     }
 
     /* stop all subscriptions of this session */
-    sr_session_unsubscribe(session);
+    if ((rc = sr_session_unsubscribe(session))) {
+        return rc;
+    }
 
     /* free the session itself */
-    tmp_err = _sr_session_stop(session);
-    sr_errinfo_merge(&err_info, tmp_err);
+    if ((err_info = _sr_session_stop(session))) {
+        return sr_api_ret(NULL, err_info);
+    }
 
-    return sr_api_ret(NULL, err_info);
+    return sr_api_ret(NULL, NULL);
 }
 
 API int
 sr_session_unsubscribe(sr_session_ctx_t *session)
 {
-    sr_error_info_t *err_info = NULL, *tmp_err;
+    sr_error_info_t *err_info = NULL;
 
     if (!session) {
         return sr_api_ret(NULL, NULL);
     }
 
     while (session->subscription_count) {
-        tmp_err = sr_subscr_session_del(session->subscriptions[0], session, SR_LOCK_NONE);
-        sr_errinfo_merge(&err_info, tmp_err);
+        if ((err_info = sr_subscr_session_del(session->subscriptions[0], session, SR_LOCK_NONE))) {
+            return sr_api_ret(NULL, err_info);
+        }
     }
 
-    return sr_api_ret(NULL, err_info);
+    return sr_api_ret(NULL, NULL);
 }
 
 API int
@@ -1034,14 +1056,14 @@ sr_get_module_name_format(const char *schema_path, char **module_name, LYS_INFOR
  * @param[in] format Module format.
  * @param[in] features Features to enable.
  * @param[in] search_dirs Optional search dirs, in format <dir>[:<dir>]*.
+ * @param[out] ly_mod Parsed libyang module.
  * @return err_info, NULL on success.
  */
-static const struct lys_module *
+static sr_error_info_t *
 sr_parse_module(struct ly_ctx *ly_ctx, const char *schema_path, LYS_INFORMAT format, const char **features,
-        const char *search_dirs)
+        const char *search_dirs, const struct lys_module **ly_mod)
 {
     sr_error_info_t *err_info = NULL;
-    const struct lys_module *ly_mod = NULL;
     char *sdirs_str = NULL, *ptr, *ptr2 = NULL;
     size_t sdir_count = 0;
     struct ly_in *in = NULL;
@@ -1064,10 +1086,19 @@ sr_parse_module(struct ly_ctx *ly_ctx, const char *schema_path, LYS_INFORMAT for
 
     /* parse the module */
     if (ly_in_new_filepath(schema_path, 0, &in)) {
-        SR_ERRINFO_MEM(&err_info);
+        sr_errinfo_new(&err_info, SR_ERR_INVAL_ARG, "Failed to parse \"%s\".", schema_path);
         goto cleanup;
     }
-    lys_parse(ly_ctx, in, format, features, &ly_mod);
+    if (lys_parse(ly_ctx, in, format, features, (struct lys_module **)ly_mod)) {
+        sr_errinfo_new_ly(&err_info, ly_ctx);
+        goto cleanup;
+    }
+
+    /* compile */
+    if (ly_ctx_compile(ly_ctx)) {
+        sr_errinfo_new_ly(&err_info, ly_ctx);
+        goto cleanup;
+    }
 
 cleanup:
     /* remove added search dirs */
@@ -1075,15 +1106,17 @@ cleanup:
 
     ly_in_free(in, 0);
     free(sdirs_str);
-    sr_errinfo_free(&err_info);
-    return ly_mod;
+    if (err_info) {
+        *ly_mod = NULL;
+    }
+    return err_info;
 }
 
 API int
 sr_install_module(sr_conn_ctx_t *conn, const char *schema_path, const char *search_dirs, const char **features)
 {
     sr_error_info_t *err_info = NULL;
-    struct ly_ctx *tmp_ly_ctx = NULL, *sr_mods_ctx = NULL;
+    struct ly_ctx *tmp_ly_ctx = NULL;
     struct lyd_node *sr_mods = NULL;
     const struct lys_module *ly_mod, *ly_iter, *ly_iter2;
     LYS_INFORMAT format;
@@ -1096,12 +1129,8 @@ sr_install_module(sr_conn_ctx_t *conn, const char *schema_path, const char *sear
     if ((err_info = sr_shmmain_ly_ctx_init(&tmp_ly_ctx))) {
         goto cleanup;
     }
-    /* create temporary context for sr_mods to free memory correctly */
-    if ((err_info = sr_shmmain_ly_ctx_init(&sr_mods_ctx))) {
-        goto cleanup;
-    }
-    /* create a link between sr_mods and sr_mods_ctx */
-    if ((err_info = sr_lydmods_parse(sr_mods_ctx, &sr_mods))) {
+    /* parse sr_mods */
+    if ((err_info = sr_lydmods_parse(tmp_ly_ctx, &sr_mods))) {
         goto cleanup;
     }
     /* use temporary context to load modules */
@@ -1118,9 +1147,7 @@ sr_install_module(sr_conn_ctx_t *conn, const char *schema_path, const char *sear
     ly_mod = ly_ctx_get_module_implemented(conn->ly_ctx, mod_name);
     if (ly_mod) {
         /* it is currently in the context, try to parse it again to check revisions */
-        ly_mod = sr_parse_module(tmp_ly_ctx, schema_path, format, features, search_dirs);
-        if (!ly_mod) {
-            sr_errinfo_new_ly_first(&err_info, tmp_ly_ctx);
+        if ((err_info = sr_parse_module(tmp_ly_ctx, schema_path, format, features, search_dirs, &ly_mod))) {
             sr_errinfo_new(&err_info, SR_ERR_EXISTS, "Module \"%s\" is already in sysrepo.", mod_name);
             goto cleanup;
         }
@@ -1136,8 +1163,7 @@ sr_install_module(sr_conn_ctx_t *conn, const char *schema_path, const char *sear
     }
 
     /* parse the module with the features */
-    if (!(ly_mod = sr_parse_module(tmp_ly_ctx, schema_path, format, features, search_dirs))) {
-        sr_errinfo_new_ly(&err_info, tmp_ly_ctx);
+    if ((err_info = sr_parse_module(tmp_ly_ctx, schema_path, format, features, search_dirs, &ly_mod))) {
         goto cleanup;
     }
 
@@ -1176,9 +1202,8 @@ sr_install_module(sr_conn_ctx_t *conn, const char *schema_path, const char *sear
     /* success */
 
 cleanup:
-    ly_ctx_destroy(tmp_ly_ctx);
     lyd_free_all(sr_mods);
-    ly_ctx_destroy(sr_mods_ctx);
+    ly_ctx_destroy(tmp_ly_ctx);
     free(mod_name);
     return sr_api_ret(NULL, err_info);
 }
@@ -1284,8 +1309,7 @@ sr_update_module(sr_conn_ctx_t *conn, const char *schema_path, const char *searc
     }
 
     /* try to parse the update module */
-    if (!(upd_ly_mod = sr_parse_module(tmp_ly_ctx, schema_path, format, NULL, search_dirs))) {
-        sr_errinfo_new_ly(&err_info, tmp_ly_ctx);
+    if ((err_info = sr_parse_module(tmp_ly_ctx, schema_path, format, NULL, search_dirs, &upd_ly_mod))) {
         goto cleanup;
     }
 
@@ -1403,7 +1427,7 @@ _sr_set_module_access(const char *module_name, sr_mod_t *shm_mod, const char *ow
     time_t from_ts, to_ts;
     char *path = NULL;
 
-    assert(module_name && shm_mod && (owner || group || ((int)perm != -1)));
+    assert(module_name && shm_mod && (owner || group || (perm != (mode_t)(-1))));
 
     /* get startup file path */
     if ((err_info = sr_path_startup_file(module_name, &path))) {
@@ -1471,7 +1495,7 @@ sr_set_module_access(sr_conn_ctx_t *conn, const char *module_name, const char *o
     uint32_t i;
     sr_main_shm_t *main_shm;
 
-    SR_CHECK_ARG_APIRET(!conn || (!owner && !group && ((int)perm == -1)), NULL, err_info);
+    SR_CHECK_ARG_APIRET(!conn || (!owner && !group && (perm == (mode_t)(-1))), NULL, err_info);
     main_shm = SR_CONN_MAIN_SHM(conn);
 
     if (module_name) {
@@ -1672,6 +1696,10 @@ cleanup:
     ly_set_free(set, NULL);
     ly_set_erase(&mod_set, NULL);
     sr_modinfo_free(&mod_info);
+    if (err_info) {
+        free(*value);
+        *value = NULL;
+    }
     return sr_api_ret(session, err_info);
 }
 
@@ -1997,16 +2025,14 @@ sr_delete_item(sr_session_ctx_t *session, const char *path, const sr_edit_option
     const struct lysc_node *snode;
     int ly_log_opts;
 
-    SR_CHECK_ARG_APIRET(!session || !path, session, err_info);
+    SR_CHECK_ARG_APIRET(!session || !SR_IS_CONVENTIONAL_DS(session->ds) || !path, session, err_info);
 
     /* turn off logging */
     ly_log_opts = ly_log_options(0);
     if ((path[strlen(path) - 1] != ']') && (snode = lys_find_path(session->conn->ly_ctx, NULL, path, 0)) &&
             (snode->nodetype & (LYS_LEAFLIST | LYS_LIST)) && !strcmp((path + strlen(path)) - strlen(snode->name), snode->name)) {
-        SR_CHECK_ARG_APIRET(!SR_IS_CONVENTIONAL_DS(session->ds), session, err_info);
         operation = "purge";
     } else if (opts & SR_EDIT_STRICT) {
-        SR_CHECK_ARG_APIRET(!SR_IS_CONVENTIONAL_DS(session->ds), session, err_info);
         operation = "delete";
     } else {
         operation = "remove";
@@ -2016,6 +2042,19 @@ sr_delete_item(sr_session_ctx_t *session, const char *path, const sr_edit_option
     /* add the operation into edit */
     err_info = sr_edit_add(session, path, NULL, operation, opts & SR_EDIT_STRICT ? "none" : "ether", NULL, NULL, NULL,
             NULL, opts & SR_EDIT_ISOLATE);
+
+    return sr_api_ret(session, err_info);
+}
+
+API int
+sr_oper_delete_item_str(sr_session_ctx_t *session, const char *path, const char *value, const sr_edit_options_t opts)
+{
+    sr_error_info_t *err_info = NULL;
+
+    SR_CHECK_ARG_APIRET(!session || SR_IS_CONVENTIONAL_DS(session->ds) || !path, session, err_info);
+
+    /* add the operation into edit */
+    err_info = sr_edit_add(session, path, value, "remove", "ether", NULL, NULL, NULL, NULL, opts & SR_EDIT_ISOLATE);
 
     return sr_api_ret(session, err_info);
 }
@@ -2147,7 +2186,7 @@ sr_validate(sr_session_ctx_t *session, const char *module_name, uint32_t timeout
                     break;
                 }
             }
-            if (!ly_mod) {
+            if (!node) {
                 /* nothing to validate */
                 goto cleanup;
             }
@@ -2632,7 +2671,7 @@ sr_replace_config(sr_session_ctx_t *session, const char *module_name, struct lyd
 
     SR_CHECK_ARG_APIRET(!session || !SR_IS_CONVENTIONAL_DS(session->ds), session, err_info);
 
-    if (src_config && (session->conn->ly_ctx != src_config->schema->module->ctx)) {
+    if (src_config && (session->conn->ly_ctx != LYD_CTX(src_config))) {
         sr_errinfo_new(&err_info, SR_ERR_INVAL_ARG, "Data trees must be created using the session connection libyang context.");
         return sr_api_ret(session, err_info);
     }
@@ -2642,7 +2681,7 @@ sr_replace_config(sr_session_ctx_t *session, const char *module_name, struct lyd
     }
 
     /* find first sibling */
-    for ( ; src_config && src_config->prev->next; src_config = src_config->prev) {}
+    src_config = lyd_first_sibling(src_config);
 
     if (module_name) {
         /* try to find this module */
@@ -2761,10 +2800,10 @@ cleanup:
 static sr_error_info_t *
 sr_change_dslock(struct sr_mod_info_s *mod_info, int lock, uint32_t sid)
 {
-    sr_error_info_t *err_info = NULL;
+    sr_error_info_t *err_info = NULL, *tmp_err;
     uint32_t i, j;
     char *path;
-    int r;
+    int r, ds_lock = 0;
     struct sr_mod_info_mod_s *mod;
     struct sr_mod_lock_s *shm_lock;
 
@@ -2773,6 +2812,12 @@ sr_change_dslock(struct sr_mod_info_s *mod_info, int lock, uint32_t sid)
         shm_lock = &mod->shm_mod->data_lock_info[mod_info->ds];
 
         assert(mod->state & MOD_INFO_REQ);
+
+        /* DS LOCK */
+        if ((err_info = sr_mlock(&shm_lock->ds_lock, SR_DS_LOCK_TIMEOUT, __func__, NULL, NULL))) {
+            goto error;
+        }
+        ds_lock = 1;
 
         /* it was successfully WRITE-locked, check that DS lock state is as expected */
         if (shm_lock->ds_lock_sid && lock) {
@@ -2811,23 +2856,40 @@ sr_change_dslock(struct sr_mod_info_s *mod_info, int lock, uint32_t sid)
             shm_lock->ds_lock_sid = 0;
             memset(&shm_lock->ds_lock_ts, 0, sizeof shm_lock->ds_lock_ts);
         }
+
+        /* DS UNLOCK */
+        sr_munlock(&shm_lock->ds_lock);
+        ds_lock = 0;
     }
 
     return NULL;
 
 error:
+    if (ds_lock) {
+        /* DS UNLOCK */
+        sr_munlock(&shm_lock->ds_lock);
+    }
+
     /* reverse any DS lock state changes */
     for (j = 0; j < i; ++j) {
         shm_lock = &mod_info->mods[j].shm_mod->data_lock_info[mod_info->ds];
 
         assert(((shm_lock->ds_lock_sid == sid) && lock) || (!shm_lock->ds_lock_sid && !lock));
 
-        if (lock) {
-            shm_lock->ds_lock_sid = 0;
-            memset(&shm_lock->ds_lock_ts, 0, sizeof shm_lock->ds_lock_ts);
+        /* DS LOCK */
+        if ((tmp_err = sr_mlock(&shm_lock->ds_lock, SR_DS_LOCK_TIMEOUT, __func__, NULL, NULL))) {
+            sr_errinfo_free(&tmp_err);
         } else {
-            shm_lock->ds_lock_sid = sid;
-            sr_time_get(&shm_lock->ds_lock_ts, 0);
+            if (lock) {
+                shm_lock->ds_lock_sid = 0;
+                memset(&shm_lock->ds_lock_ts, 0, sizeof shm_lock->ds_lock_ts);
+            } else {
+                shm_lock->ds_lock_sid = sid;
+                sr_time_get(&shm_lock->ds_lock_ts, 0);
+            }
+
+            /* DS UNLOCK */
+            sr_munlock(&shm_lock->ds_lock);
         }
     }
 
@@ -2863,7 +2925,7 @@ _sr_un_lock(sr_session_ctx_t *session, const char *module_name, int lock)
         }
     }
 
-    /* collect all required modules and lock */
+    /* collect all required modules and lock to wait until other sessions finish working with the data */
     if (ly_mod) {
         ly_set_add(&mod_set, (void *)ly_mod, 0, NULL);
     } else {
@@ -2920,6 +2982,8 @@ sr_get_lock(sr_conn_ctx_t *conn, sr_datastore_t datastore, const char *module_na
     const struct lys_module *ly_mod = NULL;
     struct sr_mod_lock_s *shm_lock = NULL;
     uint32_t i, sid;
+    struct timespec ts;
+    int ds_locked;
 
     SR_CHECK_ARG_APIRET(!conn || !SR_IS_CONVENTIONAL_DS(datastore) || !is_locked, NULL, err_info);
 
@@ -2948,41 +3012,53 @@ sr_get_lock(sr_conn_ctx_t *conn, sr_datastore_t datastore, const char *module_na
     } else {
         sr_ly_set_add_all_modules_with_data(&mod_set, conn->ly_ctx, 0);
     }
-    if ((err_info = sr_modinfo_add_modules(&mod_info, &mod_set, 0, SR_LOCK_READ,
+    if ((err_info = sr_modinfo_add_modules(&mod_info, &mod_set, 0, SR_LOCK_NONE,
             SR_MI_DATA_NO | SR_MI_PERM_READ | SR_MI_PERM_STRICT, 0, NULL, NULL, NULL, 0, 0))) {
         goto cleanup;
     }
 
     /* check DS-lock of the module(s) */
+    ds_locked = 1;
     sid = 0;
-    for (i = 0; i < mod_info.mod_count; ++i) {
+    for (i = 0; (i < mod_info.mod_count) && ds_locked; ++i) {
         shm_lock = &mod_info.mods[i].shm_mod->data_lock_info[mod_info.ds];
+
+        /* DS LOCK */
+        if ((err_info = sr_mlock(&shm_lock->ds_lock, SR_DS_LOCK_TIMEOUT, __func__, NULL, NULL))) {
+            goto cleanup;
+        }
 
         if (!shm_lock->ds_lock_sid) {
             /* there is at least one module that is not DS-locked */
-            break;
+            ds_locked = 0;
         }
 
-        if (!sid) {
-            /* remember the first DS lock owner */
-            sid = shm_lock->ds_lock_sid;
-        } else if (sid != shm_lock->ds_lock_sid) {
-            /* more DS module lock owners, not a full DS lock */
-            break;
+        if (ds_locked) {
+            if (!sid) {
+                /* remember the first DS lock information, if full DS lock held, it will be equal for all the modules */
+                sid = shm_lock->ds_lock_sid;
+                ts = shm_lock->ds_lock_ts;
+            } else if (sid != shm_lock->ds_lock_sid) {
+                /* more DS module lock owners, not a full DS lock */
+                ds_locked = 0;
+            }
         }
+
+        /* DS UNLOCK */
+        sr_munlock(&shm_lock->ds_lock);
     }
 
-    if (i < mod_info.mod_count) {
+    if (!ds_locked) {
         /* not full DS lock */
         *is_locked = 0;
     } else if (mod_info.mod_count) {
         /* the module or all modules is DS locked by a single SR session */
         *is_locked = 1;
         if (id) {
-            *id = shm_lock->ds_lock_sid;
+            *id = sid;
         }
         if (timestamp) {
-            *timestamp = shm_lock->ds_lock_ts;
+            *timestamp = ts;
         }
     }
 
@@ -3009,7 +3085,7 @@ sr_get_event_pipe(sr_subscription_ctx_t *subscription, int *event_pipe)
 }
 
 API int
-sr_process_events(sr_subscription_ctx_t *subscription, sr_session_ctx_t *session, time_t *stop_time_in)
+sr_subscription_process_events(sr_subscription_ctx_t *subscription, sr_session_ctx_t *session, struct timespec *stop_time_in)
 {
     sr_error_info_t *err_info = NULL;
     int ret, mod_finished;
@@ -3020,7 +3096,7 @@ sr_process_events(sr_subscription_ctx_t *subscription, sr_session_ctx_t *session
     SR_CHECK_ARG_APIRET(!subscription, session, err_info);
 
     if (stop_time_in) {
-        *stop_time_in = 0;
+        memset(stop_time_in, 0, sizeof *stop_time_in);
     }
 
     /* get only READ lock to allow event processing even during unsubscribe */
@@ -3099,6 +3175,24 @@ cleanup_unlock:
     sr_rwunlock(&subscription->subs_lock, SR_SUBSCR_LOCK_TIMEOUT, SR_LOCK_READ, subscription->conn->cid, __func__);
 
     return sr_api_ret(session, err_info);
+}
+
+API int
+sr_process_events(sr_subscription_ctx_t *subscription, sr_session_ctx_t *session, time_t *stop_time_in)
+{
+    int rc;
+    struct timespec stop_time_ts = {0};
+
+    if (stop_time_in) {
+        stop_time_ts.tv_sec = *stop_time_in;
+    }
+
+    rc = sr_subscription_process_events(subscription, session, &stop_time_ts);
+
+    if (stop_time_in) {
+        *stop_time_in = stop_time_ts.tv_sec + (stop_time_ts.tv_nsec ? 1 : 0);
+    }
+    return rc;
 }
 
 API uint32_t
@@ -3282,6 +3376,87 @@ sr_unsubscribe_sub(sr_subscription_ctx_t *subscription, uint32_t sub_id)
 }
 
 /**
+ * @brief Suspend the default handler thread of a subscription.
+ *
+ * @param[in] subscription Subscription structure.
+ * @return 0 on success.
+ * @return 1 if the thread was already suspended.
+ * @return 2 if there is no thread running.
+ */
+static int
+_sr_subscription_thread_suspend(sr_subscription_ctx_t *subscription)
+{
+    ATOMIC_T exp;
+    int result;
+
+    ATOMIC_STORE_RELAXED(exp, 1);
+
+    /* expect 1 and set to 2 */
+    ATOMIC_COMPARE_EXCHANGE_RELAXED(subscription->thread_running, exp, 2, result);
+    if (!result) {
+        if (ATOMIC_LOAD_RELAXED(exp) == 0) {
+            return 2;
+        } else {
+            return 1;
+        }
+    }
+
+    /* let the thread continue normally, no point in notifying it */
+
+    return 0;
+}
+
+API int
+sr_subscription_thread_suspend(sr_subscription_ctx_t *subscription)
+{
+    sr_error_info_t *err_info = NULL;
+    int ret;
+
+    SR_CHECK_ARG_APIRET(!subscription, NULL, err_info);
+
+    ret = _sr_subscription_thread_suspend(subscription);
+    if (ret == 2) {
+        sr_errinfo_new(&err_info, SR_ERR_UNSUPPORTED, "Subscription has no handler thread.");
+        return sr_api_ret(NULL, err_info);
+    } else if (ret == 1) {
+        sr_errinfo_new(&err_info, SR_ERR_UNSUPPORTED, "Subscription handler thread is already suspended.");
+        return sr_api_ret(NULL, err_info);
+    }
+
+    return sr_api_ret(NULL, NULL);
+}
+
+API int
+sr_subscription_thread_resume(sr_subscription_ctx_t *subscription)
+{
+    sr_error_info_t *err_info = NULL;
+    ATOMIC_T exp;
+    int result;
+
+    SR_CHECK_ARG_APIRET(!subscription, NULL, err_info);
+
+    ATOMIC_STORE_RELAXED(exp, 2);
+
+    /* expect 2 and set to 1 */
+    ATOMIC_COMPARE_EXCHANGE_RELAXED(subscription->thread_running, exp, 1, result);
+    if (!result) {
+        if (ATOMIC_LOAD_RELAXED(exp) == 0) {
+            sr_errinfo_new(&err_info, SR_ERR_UNSUPPORTED, "Subscription has no handler thread.");
+        } else {
+            sr_errinfo_new(&err_info, SR_ERR_UNSUPPORTED, "Subscription handler thread was not suspended.");
+        }
+        return sr_api_ret(NULL, err_info);
+    }
+
+    /* generate a new event for the thread to wake up */
+    if ((err_info = sr_shmsub_notify_evpipe(subscription->evpipe_num))) {
+        return sr_api_ret(NULL, err_info);
+    }
+
+    return sr_api_ret(NULL, NULL);
+}
+
+/**
  * @brief Unlocked unsubscribe (free) of all the subscriptions in a subscription structure.
  *
  * @param[in] subscription Subscription to unsubscribe and free.
@@ -3297,9 +3472,8 @@ _sr_unsubscribe(sr_subscription_ctx_t *subscription)
     assert(subscription);
 
     /* delete a specific subscription or delete all subscriptions which also removes this subscription from all the sessions */
-    if ((tmp_err = sr_subscr_del(subscription, 0, SR_LOCK_NONE))) {
-        /* continue */
-        sr_errinfo_merge(&err_info, tmp_err);
+    if ((err_info = sr_subscr_del(subscription, 0, SR_LOCK_NONE))) {
+        return err_info;
     }
 
     /* no new events can be generated at this point */
@@ -3309,9 +3483,9 @@ _sr_unsubscribe(sr_subscription_ctx_t *subscription)
         ATOMIC_STORE_RELAXED(subscription->thread_running, 0);
 
         /* generate a new event for the thread to wake up */
-        err_info = sr_shmsub_notify_evpipe(subscription->evpipe_num);
-
-        if (!err_info) {
+        if ((tmp_err = sr_shmsub_notify_evpipe(subscription->evpipe_num))) {
+            sr_errinfo_merge(&err_info, tmp_err);
+        } else {
             /* join the thread */
             ret = pthread_join(subscription->tid, NULL);
             if (ret) {
@@ -3394,11 +3568,11 @@ sr_module_change_subscribe_enable(sr_session_ctx_t *session, struct sr_mod_info_
     /* select only the subscribed-to subtree */
     if (mod_info->data) {
         if (xpath) {
-            if ((err_info = sr_lyd_dup_enabled_xpath(mod_info->data, (char **)&xpath, 1, &enabled_data))) {
+            if ((err_info = sr_lyd_get_enabled_xpath(&mod_info->data, (char **)&xpath, 1, 1, &enabled_data))) {
                 goto cleanup;
             }
         } else {
-            if ((err_info = sr_lyd_dup_module_data(mod_info->data, ly_mod, 0, &enabled_data))) {
+            if ((err_info = sr_lyd_get_module_data(&mod_info->data, ly_mod, 0, 1, &enabled_data))) {
                 goto cleanup;
             }
         }
@@ -3509,7 +3683,11 @@ sr_subscr_new(sr_conn_ctx_t *conn, sr_subscr_options_t opts, sr_subscription_ctx
 
     if (!(opts & SR_SUBSCR_NO_THREAD)) {
         /* set thread_running to non-zero so that thread does not immediately quit */
-        ATOMIC_STORE_RELAXED((*subs_p)->thread_running, 1);
+        if (opts & SR_SUBSCR_THREAD_SUSPEND) {
+            ATOMIC_STORE_RELAXED((*subs_p)->thread_running, 2);
+        } else {
+            ATOMIC_STORE_RELAXED((*subs_p)->thread_running, 1);
+        }
 
         /* start the listen thread */
         ret = pthread_create(&(*subs_p)->tid, NULL, sr_shmsub_listen_thread, *subs_p);
@@ -3605,6 +3783,9 @@ sr_module_change_subscribe(sr_session_ctx_t *session, const char *module_name, c
         if ((err_info = sr_subscr_new(conn, opts, subscription))) {
             goto cleanup;
         }
+    } else if (opts & SR_SUBSCR_THREAD_SUSPEND) {
+        /* suspend the running thread */
+        _sr_subscription_thread_suspend(*subscription);
     }
 
     /* add module subscription into ext SHM */
@@ -3780,9 +3961,11 @@ _sr_get_changes_iter(sr_session_ctx_t *session, const char *xpath, int dup, sr_c
             goto error;
         }
     } else {
-        ly_set_new(&(*iter)->set);
+        if (ly_set_new(&(*iter)->set)) {
+            SR_ERRINFO_MEM(&err_info);
+            goto error;
+        }
     }
-    SR_CHECK_MEM_GOTO(!(*iter)->set, err_info, error);
     (*iter)->idx = 0;
 
     return sr_api_ret(session, NULL);
@@ -4191,6 +4374,9 @@ _sr_rpc_subscribe(sr_session_ctx_t *session, const char *xpath, sr_rpc_cb callba
         if ((err_info = sr_subscr_new(conn, opts, subscription))) {
             goto error1;
         }
+    } else if (opts & SR_SUBSCR_THREAD_SUSPEND) {
+        /* suspend the running thread */
+        _sr_subscription_thread_suspend(*subscription);
     }
 
     /* get new sub ID */
@@ -4559,13 +4745,13 @@ sr_event_notif_lysc_dfs_cb(struct lysc_node *node, void *data, ly_bool *dfs_cont
  * @return err_code (SR_ERR_OK on success).
  */
 static int
-_sr_event_notif_subscribe(sr_session_ctx_t *session, const char *mod_name, const char *xpath, time_t start_time,
-        time_t stop_time, sr_event_notif_cb callback, sr_event_notif_tree_cb tree_callback, void *private_data,
-        sr_subscr_options_t opts, sr_subscription_ctx_t **subscription)
+_sr_notif_subscribe(sr_session_ctx_t *session, const char *mod_name, const char *xpath, const struct timespec *start_time,
+        const struct timespec *stop_time, sr_event_notif_cb callback, sr_event_notif_tree_cb tree_callback,
+        void *private_data, sr_subscr_options_t opts, sr_subscription_ctx_t **subscription)
 {
     sr_error_info_t *err_info = NULL, *tmp_err;
     struct ly_set *set;
-    time_t cur_ts = time(NULL);
+    struct timespec listen_since, cur_ts;
     const struct lys_module *ly_mod;
     sr_conn_ctx_t *conn;
     uint32_t i, sub_id;
@@ -4573,8 +4759,12 @@ _sr_event_notif_subscribe(sr_session_ctx_t *session, const char *mod_name, const
     LY_ERR lyrc;
     int found;
 
-    SR_CHECK_ARG_APIRET(!session || SR_IS_EVENT_SESS(session) || !mod_name || (start_time && (start_time > cur_ts)) ||
-            (stop_time && ((start_time && (stop_time < start_time)) || (!start_time && (stop_time < cur_ts)))) ||
+    sr_time_get(&cur_ts, 0);
+
+    SR_CHECK_ARG_APIRET(!session || SR_IS_EVENT_SESS(session) || !mod_name ||
+            (start_time && (sr_time_cmp(start_time, &cur_ts) > 0)) ||
+            (stop_time && ((start_time && (sr_time_cmp(stop_time, start_time) < 0)) ||
+            (!start_time && (sr_time_cmp(stop_time, &cur_ts) < 0)))) ||
             (!callback && !tree_callback) || !subscription, session, err_info);
 
     /* is the module name valid? */
@@ -4631,6 +4821,9 @@ _sr_event_notif_subscribe(sr_session_ctx_t *session, const char *mod_name, const
         if ((err_info = sr_subscr_new(conn, opts, subscription))) {
             return sr_api_ret(session, err_info);
         }
+    } else if (opts & SR_SUBSCR_THREAD_SUSPEND) {
+        /* suspend the running thread */
+        _sr_subscription_thread_suspend(*subscription);
     }
 
     /* get new sub ID */
@@ -4644,15 +4837,21 @@ _sr_event_notif_subscribe(sr_session_ctx_t *session, const char *mod_name, const
     shm_mod = sr_shmmain_find_module(SR_CONN_MAIN_SHM(conn), ly_mod->name);
     SR_CHECK_INT_GOTO(!shm_mod, err_info, error1);
 
-    /* add notification subscription into main SHM, suspended if replay was requested */
-    if ((err_info = sr_shmext_notif_sub_add(conn, shm_mod, sub_id, (*subscription)->evpipe_num, start_time ? 1 : 0))) {
+    /* add notification subscription into main SHM and create separate specific SHM segment */
+    if ((err_info = sr_shmext_notif_sub_add(conn, shm_mod, sub_id, (*subscription)->evpipe_num, &listen_since))) {
         goto error1;
     }
 
-    /* add subscription into structure and create separate specific SHM segment */
-    if ((err_info = sr_subscr_notif_sub_add(*subscription, sub_id, session, ly_mod->name, xpath, start_time, stop_time,
-            callback, tree_callback, private_data, 0))) {
+    /* add subscription into structure */
+    if ((err_info = sr_subscr_notif_sub_add(*subscription, sub_id, session, ly_mod->name, xpath, &listen_since,
+            start_time, stop_time, callback, tree_callback, private_data, 0))) {
         goto error2;
+    }
+
+    /* add the subscription into session */
+    if ((err_info = sr_ptr_add(&session->ptr_lock, (void ***)&session->subscriptions, &session->subscription_count,
+            *subscription))) {
+        goto error3;
     }
 
     if (start_time || stop_time) {
@@ -4660,12 +4859,6 @@ _sr_event_notif_subscribe(sr_session_ctx_t *session, const char *mod_name, const
         if ((err_info = sr_shmsub_notify_evpipe((*subscription)->evpipe_num))) {
             goto error3;
         }
-    }
-
-    /* add the subscription into session */
-    if ((err_info = sr_ptr_add(&session->ptr_lock, (void ***)&session->subscriptions, &session->subscription_count,
-            *subscription))) {
-        goto error3;
     }
 
     return sr_api_ret(session, NULL);
@@ -4688,12 +4881,35 @@ error1:
 }
 
 API int
+sr_notif_subscribe(sr_session_ctx_t *session, const char *module_name, const char *xpath, const struct timespec *start_time,
+        const struct timespec *stop_time, sr_event_notif_cb callback, void *private_data, sr_subscr_options_t opts,
+        sr_subscription_ctx_t **subscription)
+{
+    return _sr_notif_subscribe(session, module_name, xpath, start_time, stop_time, callback, NULL, private_data, opts,
+            subscription);
+}
+
+API int
+sr_notif_subscribe_tree(sr_session_ctx_t *session, const char *module_name, const char *xpath,
+        const struct timespec *start_time, const struct timespec *stop_time, sr_event_notif_tree_cb callback,
+        void *private_data, sr_subscr_options_t opts, sr_subscription_ctx_t **subscription)
+{
+    return _sr_notif_subscribe(session, module_name, xpath, start_time, stop_time, NULL, callback, private_data, opts,
+            subscription);
+}
+
+API int
 sr_event_notif_subscribe(sr_session_ctx_t *session, const char *module_name, const char *xpath, time_t start_time,
         time_t stop_time, sr_event_notif_cb callback, void *private_data, sr_subscr_options_t opts,
         sr_subscription_ctx_t **subscription)
 {
-    return _sr_event_notif_subscribe(session, module_name, xpath, start_time, stop_time, callback, NULL, private_data,
-            opts, subscription);
+    struct timespec start_ts = {0}, stop_ts = {0};
+
+    start_ts.tv_sec = start_time;
+    stop_ts.tv_sec = stop_time;
+
+    return _sr_notif_subscribe(session, module_name, xpath, start_time ? &start_ts : NULL, stop_time ? &stop_ts : NULL,
+            callback, NULL, private_data, opts, subscription);
 }
 
 API int
@@ -4701,8 +4917,13 @@ sr_event_notif_subscribe_tree(sr_session_ctx_t *session, const char *module_name
         time_t stop_time, sr_event_notif_tree_cb callback, void *private_data, sr_subscr_options_t opts,
         sr_subscription_ctx_t **subscription)
 {
-    return _sr_event_notif_subscribe(session, module_name, xpath, start_time, stop_time, NULL, callback, private_data,
-            opts, subscription);
+    struct timespec start_ts = {0}, stop_ts = {0};
+
+    start_ts.tv_sec = start_time;
+    stop_ts.tv_sec = stop_time;
+
+    return _sr_notif_subscribe(session, module_name, xpath, start_time ? &start_ts : NULL, stop_time ? &stop_ts : NULL,
+            NULL, callback, private_data, opts, subscription);
 }
 
 API int
@@ -4876,8 +5097,8 @@ cleanup:
 }
 
 API int
-sr_event_notif_sub_get_info(sr_subscription_ctx_t *subscription, uint32_t sub_id, const char **module_name,
-        const char **xpath, time_t *start_time, time_t *stop_time, uint32_t *filtered_out)
+sr_notif_sub_get_info(sr_subscription_ctx_t *subscription, uint32_t sub_id, const char **module_name,
+        const char **xpath, struct timespec *start_time, struct timespec *stop_time, uint32_t *filtered_out)
 {
     sr_error_info_t *err_info = NULL;
     struct modsub_notifsub_s *notif_sub;
@@ -4916,6 +5137,24 @@ cleanup_unlock:
     sr_rwunlock(&subscription->subs_lock, SR_SUBSCR_LOCK_TIMEOUT, SR_LOCK_READ, subscription->conn->cid, __func__);
 
     return sr_api_ret(NULL, err_info);
+}
+
+API int
+sr_event_notif_sub_get_info(sr_subscription_ctx_t *subscription, uint32_t sub_id, const char **module_name,
+        const char **xpath, time_t *start_time, time_t *stop_time, uint32_t *filtered_out)
+{
+    int rc;
+    struct timespec start_ts, stop_ts;
+
+    rc = sr_notif_sub_get_info(subscription, sub_id, module_name, xpath, &start_ts, &stop_ts, filtered_out);
+
+    if (start_time) {
+        *start_time = start_ts.tv_sec;
+    }
+    if (stop_time) {
+        *stop_time = stop_ts.tv_sec;
+    }
+    return rc;
 }
 
 API int
@@ -4977,7 +5216,7 @@ cleanup_unlock:
 }
 
 API int
-sr_event_notif_sub_modify_stop_time(sr_subscription_ctx_t *subscription, uint32_t sub_id, time_t stop_time)
+sr_notif_sub_modify_stop_time(sr_subscription_ctx_t *subscription, uint32_t sub_id, const struct timespec *stop_time)
 {
     sr_error_info_t *err_info = NULL;
     struct modsub_notifsub_s *notif_sub;
@@ -5000,18 +5239,22 @@ sr_event_notif_sub_modify_stop_time(sr_subscription_ctx_t *subscription, uint32_
     }
 
     /* check stop time validity */
-    if (stop_time && !notif_sub->start_time && (stop_time < notif_sub->start_time)) {
+    if (stop_time && !notif_sub->start_time.tv_sec && (sr_time_cmp(stop_time, &notif_sub->start_time) < 0)) {
         sr_errinfo_new(&err_info, SR_ERR_INVAL_ARG, "Stop time cannot be earlier than start time.");
         goto cleanup_unlock;
     }
 
     /* if the stop time is the same, there is nothing to modify */
-    if (stop_time == notif_sub->stop_time) {
+    if (stop_time && (sr_time_cmp(stop_time, &notif_sub->stop_time) == 0)) {
         goto cleanup_unlock;
     }
 
     /* update stop time */
-    notif_sub->stop_time = stop_time;
+    if (stop_time) {
+        notif_sub->stop_time = *stop_time;
+    } else {
+        memset(&notif_sub->stop_time, 0, sizeof notif_sub->stop_time);
+    }
 
     /* create event session */
     if ((err_info = _sr_session_start(subscription->conn, SR_DS_OPERATIONAL, SR_SUB_EV_NOTIF, NULL, &ev_sess))) {
@@ -5025,12 +5268,27 @@ sr_event_notif_sub_modify_stop_time(sr_subscription_ctx_t *subscription, uint32_
         goto cleanup_unlock;
     }
 
+    /* generate a new event for the thread to wake up */
+    if ((err_info = sr_shmsub_notify_evpipe(subscription->evpipe_num))) {
+        goto cleanup_unlock;
+    }
+
 cleanup_unlock:
     /* SUBS WRITE UNLOCK */
     sr_rwunlock(&subscription->subs_lock, SR_SUBSCR_LOCK_TIMEOUT, SR_LOCK_WRITE, subscription->conn->cid, __func__);
 
     sr_session_stop(ev_sess);
     return sr_api_ret(NULL, err_info);
+}
+
+API int
+sr_event_notif_sub_modify_stop_time(sr_subscription_ctx_t *subscription, uint32_t sub_id, time_t stop_time)
+{
+    struct timespec stop_ts = {0};
+
+    stop_ts.tv_sec = stop_time;
+
+    return sr_notif_sub_modify_stop_time(subscription, sub_id, stop_time ? &stop_ts : NULL);
 }
 
 /**
@@ -5048,7 +5306,7 @@ sr_oper_sub_get_type(const struct ly_ctx *ly_ctx, const char *path, sr_mod_oper_
     sr_error_info_t *err_info = NULL;
     struct lysc_node *elem;
     struct ly_set *set = NULL;
-    uint16_t i;
+    uint32_t i;
 
     if (lys_find_xpath(ly_ctx, NULL, path, 0, &set)) {
         sr_errinfo_new_ly(&err_info, ly_ctx);
@@ -5158,6 +5416,9 @@ sr_oper_get_items_subscribe(sr_session_ctx_t *session, const char *module_name, 
         if ((err_info = sr_subscr_new(conn, opts, subscription))) {
             return sr_api_ret(session, err_info);
         }
+    } else if (opts & SR_SUBSCR_THREAD_SUSPEND) {
+        /* suspend the running thread */
+        _sr_subscription_thread_suspend(*subscription);
     }
 
     /* get new sub ID */

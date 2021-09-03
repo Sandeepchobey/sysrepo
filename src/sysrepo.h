@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <libyang/libyang.h>
 
@@ -134,7 +135,7 @@ int sr_connect(const sr_conn_options_t opts, sr_conn_ctx_t **conn);
  * Cleans up and frees connection context allocated by ::sr_connect. All sessions and subscriptions
  * started within the connection will be automatically stopped and cleaned up too.
  *
- * @note Connection and all its associated sessions and subscriptions can no longer be used even on error.
+ * @note On error the function should be retried and must eventually succeed.
  *
  * @param[in] conn Connection acquired with ::sr_connect call.
  * @return Error code (::SR_ERR_OK on success).
@@ -166,6 +167,13 @@ const struct ly_ctx *sr_get_context(sr_conn_ctx_t *conn);
  * @return Content ID.
  */
 uint32_t sr_get_content_id(sr_conn_ctx_t *conn);
+
+/**
+ * @brief Get the sysrepo SUPERUSER UID.
+ *
+ * @return Sysrepo SU UID.
+ */
+uid_t sr_get_su_uid(void);
 
 /**
  * @brief Set callback for checking every diff before it is applied on the datastore.
@@ -216,9 +224,9 @@ int sr_session_start(sr_conn_ctx_t *conn, const sr_datastore_t datastore, sr_ses
  *
  * Also releases any locks held and frees subscriptions created (only) by this session.
  *
- * @note Session can no longer be used even on error. Subscriptions, even
- * if they no longer handle any events are **never** freed and should be freed
- * manually using ::sr_unsubscribe.
+ * @note On error the function should be retried and must eventually succeed.
+ * Subscriptions, even if they no longer handle any events are **never** freed and
+ * should be freed manually using ::sr_unsubscribe.
  *
  * @param[in] session Session to use.
  * @return Error code (::SR_ERR_OK on success).
@@ -447,7 +455,7 @@ const char *sr_get_repo_path(void);
  * @param[in] conn Connection to use.
  * @param[in] schema_path Path to the new schema. Can have either YANG or YIN extension/format.
  * @param[in] search_dirs Optional search directories for import schemas, supports the format `<dir>[:<dir>]*`.
- * @param[in] features Array of enabled features ended with NULL.
+ * @param[in] features Optional array of enabled features ended with NULL.
  * @return Error code (::SR_ERR_OK on success).
  */
 int sr_install_module(sr_conn_ctx_t *conn, const char *schema_path, const char *search_dirs, const char **features);
@@ -717,7 +725,8 @@ void sr_free_values(sr_val_t *values, size_t count);
  * the node must not exist (otherwise an error is returned). Neither option is allowed
  * for ::SR_DS_OPERATIONAL.
  *
- * To create a list use xpath with key values included and pass NULL as value argument.
+ * To create a list use @p path with key values included in predicates, @p value will be ignored.
+ * When creating key-less lists, use positional predicates such as `[1]` to refer to the instances.
  *
  * Setting of a leaf-list value appends the value at the end of the leaf-list.
  * A value of leaf-list can be specified either by predicate in xpath or by value argument.
@@ -750,11 +759,11 @@ int sr_set_item_str(sr_session_ctx_t *session, const char *path, const char *val
         const sr_edit_options_t opts);
 
 /**
- * @brief Prepare to selete the nodes matching the specified xpath. These changes are applied only
+ * @brief Prepare to delete the nodes matching the specified xpath. These changes are applied only
  * after calling ::sr_apply_changes. The accepted values are the same as for ::sr_set_item_str.
  *
- * If ::SR_EDIT_STRICT flag is set the specified node must must exist in the datastore. Not supported for
- * ::SR_DS_OPERATIONAL.
+ * Cannot be used for ::SR_DS_OPERATIONAL. Use ::sr_oper_delete_item_str() instead.
+ * If ::SR_EDIT_STRICT flag is set the specified node must must exist in the datastore.
  * If the @p path includes the list keys/leaf-list value, the specified instance is deleted.
  * If the @p path of list/leaf-list does not include keys/value, all instances are deleted.
  *
@@ -764,6 +773,20 @@ int sr_set_item_str(sr_session_ctx_t *session, const char *path, const char *val
  * @return Error code (::SR_ERR_OK on success, ::SR_ERR_OPERATION_FAILED if the whole edit was discarded).
  */
 int sr_delete_item(sr_session_ctx_t *session, const char *path, const sr_edit_options_t opts);
+
+/**
+ * @brief Prepare to delete the nodes matching the specified xpath. These changes are applied only
+ * after calling ::sr_apply_changes. The accepted values are the same as for ::sr_set_item_str.
+ *
+ * Can be used only for ::SR_DS_OPERATIONAL. Use ::sr_delete_item() for other datastores.
+ *
+ * @param[in] session Session ([DS](@ref sr_datastore_t)-specific) to use.
+ * @param[in] path [Path](@ref paths) identifier of the data element to be deleted.
+ * @param[in] value String representation of the value deleted.
+ * @param[in] opts Options overriding default behavior of this call. ::SR_EDIT_STRICT is not supported.
+ * @return Error code (::SR_ERR_OK on success, ::SR_ERR_OPERATION_FAILED if the whole edit was discarded).
+ */
+int sr_oper_delete_item_str(sr_session_ctx_t *session, const char *path, const char *value, const sr_edit_options_t opts);
 
 /**
  * @brief Prepare to move/create the instance of an user-ordered list or leaf-list to the specified position.
@@ -802,7 +825,8 @@ int sr_move_item(sr_session_ctx_t *session, const char *path, const sr_move_posi
  *
  * @param[in] session Session ([DS](@ref sr_datastore_t)-specific) to use.
  * @param[in] edit Edit content, similar semantics to
- * [NETCONF \<edit-config\>](https://tools.ietf.org/html/rfc6241#section-7.2) content.
+ * [NETCONF \<edit-config\>](https://tools.ietf.org/html/rfc6241#section-7.2) content. Uses @p edit and all of its
+ * following siblings.
  * @param[in] default_operation Default operation for nodes without operation on themselves or any parent.
  * Possible values are `merge`, `replace`, or `none` (see [NETCONF RFC](https://tools.ietf.org/html/rfc6241#page-39)).
  * @return Error code (::SR_ERR_OK on success).
@@ -977,9 +1001,15 @@ int sr_get_event_pipe(sr_subscription_ctx_t *subscription, int *event_pipe);
  *
  * @param[in] subscription Subscription without a listening thread with some new events.
  * @param[in] session Optional session for storing errors.
- * @param[out] stop_time_in Optional seconds until the nearest notification subscription stop time is elapsed
- * and this function should be called. If there are no subscriptions with stop time in future, it is set to 0.
+ * @param[out] stop_time_in Optional time until the nearest notification subscription stop time is elapsed
+ * and this function should be called. If there are no subscriptions with stop time in future, it is zeroed.
  * @return Error code (::SR_ERR_OK on success).
+ */
+int sr_subscription_process_events(sr_subscription_ctx_t *subscription, sr_session_ctx_t *session,
+        struct timespec *stop_time_in);
+
+/**
+ * @brief Deprecated, use ::sr_subscription_process_events() instead.
  */
 int sr_process_events(sr_subscription_ctx_t *subscription, sr_session_ctx_t *session, time_t *stop_time_in);
 
@@ -1028,8 +1058,7 @@ int sr_subscription_resume(sr_subscription_ctx_t *subscription, uint32_t sub_id)
  * until ::sr_unsubscribe() is called, even if there are no actual subscriptions left in it. This
  * is useful for preventing dead locks if using the subscription in a custom event loop.
  *
- * @note Even on error, all the possible tasks are still performed and the subscripton(s)
- * are unsubscribed.
+ * @note On error the function should be retried and must eventually succeed.
  *
  * @param[in] subscription Subscription context to use.
  * @param[in] sub_id Subscription ID of the subscription to unsubscribe, 0 for all the subscriptions.
@@ -1038,10 +1067,26 @@ int sr_subscription_resume(sr_subscription_ctx_t *subscription, uint32_t sub_id)
 int sr_unsubscribe_sub(sr_subscription_ctx_t *subscription, uint32_t sub_id);
 
 /**
+ * @brief Suspend the default handler thread of a subscription structure.
+ * Meaning it will stop handling any events on the subscription until it is resumed.
+ *
+ * @param[in] subscription Subscription context with a handler thread.
+ * @return Error code (::SR_ERR_OK on success).
+ */
+int sr_subscription_thread_suspend(sr_subscription_ctx_t *subscription);
+
+/**
+ * @brief Resume the default handler thread of a subscription structure that was suspended previously.
+ *
+ * @param[in] subscription Subscription context with a handler thread.
+ * @return Error code (::SR_ERR_OK on success).
+ */
+int sr_subscription_thread_resume(sr_subscription_ctx_t *subscription);
+
+/**
  * @brief Unsubscribe all the subscriptions in a subscription structure and free it.
  *
- * @note Even on error, all the possible tasks are still performed and the subscripton(s)
- * are unsubscribed and freed. So it cannot be used anymore after calling this function.
+ * @note On error the function should be retried and must eventually succeed.
  *
  * @param[in] subscription Subscription context to use.
  * @return Error code (::SR_ERR_OK on success).
@@ -1307,9 +1352,9 @@ int sr_rpc_send_tree(sr_session_ctx_t *session, struct lyd_node *input, uint32_t
  * @note An existing context may be passed in case that ::SR_SUBSCR_CTX_REUSE option is specified.
  * @return Error code (::SR_ERR_OK on success).
  */
-int sr_event_notif_subscribe(sr_session_ctx_t *session, const char *module_name, const char *xpath, time_t start_time,
-        time_t stop_time, sr_event_notif_cb callback, void *private_data, sr_subscr_options_t opts,
-        sr_subscription_ctx_t **subscription);
+int sr_notif_subscribe(sr_session_ctx_t *session, const char *module_name, const char *xpath,
+        const struct timespec *start_time, const struct timespec *stop_time, sr_event_notif_cb callback,
+        void *private_data, sr_subscr_options_t opts, sr_subscription_ctx_t **subscription);
 
 /**
  * @brief Subscribes for the delivery of a notification(s). Data are represented as _libyang_ subtrees.
@@ -1328,6 +1373,20 @@ int sr_event_notif_subscribe(sr_session_ctx_t *session, const char *module_name,
  * @param[in,out] subscription Subscription context that is supposed to be released by ::sr_unsubscribe.
  * @note An existing context may be passed in case that ::SR_SUBSCR_CTX_REUSE option is specified.
  * @return Error code (::SR_ERR_OK on success).
+ */
+int sr_notif_subscribe_tree(sr_session_ctx_t *session, const char *module_name, const char *xpath,
+        const struct timespec *start_time, const struct timespec *stop_time, sr_event_notif_tree_cb callback,
+        void *private_data, sr_subscr_options_t opts, sr_subscription_ctx_t **subscription);
+
+/**
+ * @brief Deprecated, use ::sr_notif_subscribe() instead.
+ */
+int sr_event_notif_subscribe(sr_session_ctx_t *session, const char *module_name, const char *xpath, time_t start_time,
+        time_t stop_time, sr_event_notif_cb callback, void *private_data, sr_subscr_options_t opts,
+        sr_subscription_ctx_t **subscription);
+
+/**
+ * @brief Deprecated, use ::sr_notif_subscribe_tree() instead.
  */
 int sr_event_notif_subscribe_tree(sr_session_ctx_t *session, const char *module_name, const char *xpath,
         time_t start_time, time_t stop_time, sr_event_notif_tree_cb callback, void *private_data,
@@ -1387,6 +1446,12 @@ int sr_event_notif_send_tree(sr_session_ctx_t *session, struct lyd_node *notif, 
  * @param[out] filtered_out Optional number of filtered-out notifications of the subscription.
  * @return Error code (::SR_ERR_OK on success).
  */
+int sr_notif_sub_get_info(sr_subscription_ctx_t *subscription, uint32_t sub_id, const char **module_name,
+        const char **xpath, struct timespec *start_time, struct timespec *stop_time, uint32_t *filtered_out);
+
+/**
+ * @brief Deprecated, use ::sr_notif_sub_get_info() instead.
+ */
 int sr_event_notif_sub_get_info(sr_subscription_ctx_t *subscription, uint32_t sub_id, const char **module_name,
         const char **xpath, time_t *start_time, time_t *stop_time, uint32_t *filtered_out);
 
@@ -1407,8 +1472,13 @@ int sr_event_notif_sub_modify_xpath(sr_subscription_ctx_t *subscription, uint32_
  *
  * @param[in] subscription Subscription structure to use.
  * @param[in] sub_id Subscription ID of the specific subscription to modify.
- * @param[in] stop_time New stop time of the subscription.
+ * @param[in] stop_time New stop time of the subscription, may be NULL for none.
  * @return Error code (::SR_ERR_OK on success).
+ */
+int sr_notif_sub_modify_stop_time(sr_subscription_ctx_t *subscription, uint32_t sub_id, const struct timespec *stop_time);
+
+/**
+ * @brief Deprecated, use ::sr_notif_sub_modify_stop_time() instead.
  */
 int sr_event_notif_sub_modify_stop_time(sr_subscription_ctx_t *subscription, uint32_t sub_id, time_t stop_time);
 

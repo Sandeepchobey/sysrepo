@@ -361,7 +361,8 @@ typedef enum {
      * @brief The subscriber wants to be notified about the current configuration at the moment of subscribing.
      * It will receive ::SR_EV_ENABLED event, whose applying can fail causing the whole subscription to fail.
      * On success this event will be followed by ::SR_EV_DONE. Be careful, ::SR_EV_ENABLED will be triggered
-     * even if there are no data so there will not be any changes!
+     * even if there are no data so there will not be any changes! Also, this event callback is called as part
+     * of the subscribe call (in the same thread) unlike other events.
      */
     SR_SUBSCR_ENABLED = 16,
 
@@ -378,7 +379,14 @@ typedef enum {
      * subscription callback, keep them. Then the returned data are merged into the existing data. Accepted
      * only for operational subscriptions.
      */
-    SR_SUBSCR_OPER_MERGE = 64
+    SR_SUBSCR_OPER_MERGE = 64,
+
+    /**
+     * @brief Suspend the default handler thread before adding the subscription if it is running. In case of the
+     * first subscription, start the handler thread suspended. Meaning any events will not be handled until
+     * ::sr_subscription_thread_resume() is called.
+     */
+    SR_SUBSCR_THREAD_SUSPEND = 128
 
 } sr_subscr_flag_t;
 
